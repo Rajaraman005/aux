@@ -1,0 +1,36 @@
+{
+  "cli": {
+    "version": ">= 3.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleDebug"
+      },
+      "env": {
+        "EAS_BUILD_INSTALL_CMD": "npm install"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EAS_BUILD_INSTALL_CMD": "npm install"
+      }
+    },
+    "production": {
+      "env": {
+        "EAS_BUILD_INSTALL_CMD": "npm install"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

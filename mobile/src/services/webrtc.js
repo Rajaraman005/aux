@@ -11,12 +11,24 @@
  *
  * Call Cascade: P2P → SFU → TURN relay
  */
-import {
-  RTCPeerConnection,
-  RTCSessionDescription,
-  RTCIceCandidate,
-  mediaDevices,
-} from "react-native-webrtc";
+
+// ─── Conditional WebRTC Import (graceful fallback for Expo Go) ──────────
+let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, mediaDevices;
+let WEBRTC_AVAILABLE = false;
+
+try {
+  const webrtcModule = require("react-native-webrtc");
+  RTCPeerConnection = webrtcModule.RTCPeerConnection;
+  RTCSessionDescription = webrtcModule.RTCSessionDescription;
+  RTCIceCandidate = webrtcModule.RTCIceCandidate;
+  mediaDevices = webrtcModule.mediaDevices;
+  WEBRTC_AVAILABLE = true;
+} catch (err) {
+  console.warn(
+    "⚠️  react-native-webrtc not available (Expo Go mode). Call features disabled.",
+  );
+}
+
 import signalingClient from "./socket";
 import { endpoints } from "../config/api";
 import apiClient from "./api";
@@ -75,6 +87,11 @@ class WebRTCEngine {
 
     // Stats polling
     this.statsInterval = null;
+  }
+
+  /** Check if WebRTC native module is loaded */
+  get isAvailable() {
+    return WEBRTC_AVAILABLE;
   }
 
   /**

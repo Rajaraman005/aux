@@ -98,8 +98,10 @@ ALTER TABLE abuse_log ENABLE ROW LEVEL SECURITY;
 
 -- Service role bypasses RLS — only backend uses service role
 -- These policies allow authenticated read of public user data
-CREATE POLICY IF NOT EXISTS "Users can view verified users" ON users
+DROP POLICY IF EXISTS "Users can view verified users" ON users;
+CREATE POLICY "Users can view verified users" ON users
   FOR SELECT USING (email_verified = TRUE);
 
-CREATE POLICY IF NOT EXISTS "Service role full access users" ON users
+DROP POLICY IF EXISTS "Service role full access users" ON users;
+CREATE POLICY "Service role full access users" ON users
   FOR ALL USING (auth.role() = 'service_role');

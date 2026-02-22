@@ -3,13 +3,16 @@
  * Central endpoint definitions and base URL.
  */
 
-// Change this to your server's IP/hostname
+// ─── Your computer's LAN IP (from Expo output) ─────────────
+// Change this if your network IP changes
+const DEV_SERVER_IP = "192.168.1.3";
+
 const API_BASE = __DEV__
-  ? "http://10.0.2.2:3000" // Android emulator → host machine
+  ? `http://${DEV_SERVER_IP}:3000`
   : "https://your-production-url.com";
 
 const WS_BASE = __DEV__
-  ? "ws://10.0.2.2:3000/ws"
+  ? `ws://${DEV_SERVER_IP}:3000/ws`
   : "wss://your-production-url.com/ws";
 
 const endpoints = {

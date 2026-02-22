@@ -1,27 +1,19 @@
 /**
- * Email Verification Service.
- * Sends 6-digit codes via SMTP. Falls back to console in dev mode.
- * Production: use SendGrid, SES, or any SMTP provider.
+ * Email Verification Service — Powered by Resend.
+ * Sends beautifully designed 6-digit OTP codes.
+ * Falls back to console logging when RESEND_API_KEY is not set.
  */
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 const config = require("../config");
 
-let transporter = null;
+let resend = null;
 
-if (config.smtp.user && config.smtp.pass) {
-  transporter = nodemailer.createTransport({
-    host: config.smtp.host,
-    port: config.smtp.port,
-    secure: config.smtp.port === 465,
-    auth: {
-      user: config.smtp.user,
-      pass: config.smtp.pass,
-    },
-  });
-  console.log("✅ SMTP transport configured");
+if (config.resend.apiKey) {
+  resend = new Resend(config.resend.apiKey);
+  console.log("✅ Resend email service configured");
 } else {
   console.warn(
-    "⚠️  SMTP not configured — verification codes will be logged to console",
+    "⚠️  RESEND_API_KEY not set — verification codes will be logged to console",
   );
 }
 
@@ -33,7 +25,7 @@ function generateCode() {
 }
 
 /**
- * Send verification email with 6-digit code.
+ * Send verification email with 6-digit code via Resend.
  * @param {string} email - Recipient email
  * @param {string} name - User's name
  * @param {string} code - 6-digit verification code
@@ -52,18 +44,24 @@ async function sendVerificationEmail(email, name, code) {
     </div>
   `;
 
-  if (transporter) {
+  if (resend) {
     try {
-      await transporter.sendMail({
-        from: `"VideoCall" <${config.smtp.from}>`,
-        to: email,
+      const { data, error } = await resend.emails.send({
+        from: config.resend.from,
+        to: [email],
         subject,
         html,
       });
-      console.log(`📧 Verification email sent to ${email}`);
+
+      if (error) {
+        console.error(`❌ Resend error for ${email}:`, error);
+        console.log(`📋 [FALLBACK] Verification code for ${email}: ${code}`);
+        return;
+      }
+
+      console.log(`📧 Verification email sent to ${email} (id: ${data.id})`);
     } catch (err) {
       console.error(`❌ Failed to send email to ${email}:`, err.message);
-      // Don't throw — log and let dev see the code in console
       console.log(`📋 [FALLBACK] Verification code for ${email}: ${code}`);
     }
   } else {

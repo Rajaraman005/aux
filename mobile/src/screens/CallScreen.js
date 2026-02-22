@@ -12,9 +12,17 @@ import {
   StyleSheet,
   Dimensions,
   StatusBar,
-  SafeAreaView,
+  Alert,
 } from "react-native";
-import { RTCView } from "react-native-webrtc";
+import { SafeAreaView } from "react-native-safe-area-context";
+
+// Conditional RTCView import — falls back to View in Expo Go
+let RTCView;
+try {
+  RTCView = require("react-native-webrtc").RTCView;
+} catch {
+  RTCView = View; // Fallback
+}
 import webrtcEngine from "../services/webrtc";
 import networkMonitor, { QUALITY_TIERS } from "../services/networkMonitor";
 import audioEngine from "../services/audioEngine";
@@ -75,6 +83,17 @@ export default function CallScreen({ route, navigation }) {
     let mounted = true;
 
     const setupCall = async () => {
+      // ★ Check if WebRTC native module is available
+      if (!webrtcEngine.isAvailable) {
+        Alert.alert(
+          "WebRTC Not Available",
+          "Video/audio calls require a development build.\n\nRun: npx expo run:android",
+          [{ text: "Go Back", onPress: () => navigation.goBack() }],
+          { cancelable: false },
+        );
+        return;
+      }
+
       // WebRTC engine callbacks
       webrtcEngine.onLocalStream = (stream) =>
         mounted && setLocalStream(stream);

@@ -30,12 +30,9 @@ const config = {
     url: process.env.REDIS_URL || "redis://localhost:6379",
   },
 
-  smtp: {
-    host: process.env.SMTP_HOST || "smtp.gmail.com",
-    port: parseInt(process.env.SMTP_PORT, 10) || 587,
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-    from: process.env.SMTP_FROM || "noreply@videocall.app",
+  resend: {
+    apiKey: process.env.RESEND_API_KEY,
+    from: process.env.RESEND_FROM || "VideoCall <onboarding@resend.dev>",
   },
 
   turn: {

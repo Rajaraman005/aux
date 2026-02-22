@@ -9,15 +9,21 @@
     "splash": {
       "backgroundColor": "#0a0a1a"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.videocall.app",
       "infoPlist": {
         "NSCameraUsageDescription": "VideoCall needs camera access for video calls",
         "NSMicrophoneUsageDescription": "VideoCall needs microphone access for audio calls",
-        "UIBackgroundModes": ["voip", "audio"]
-      }
+        "UIBackgroundModes": [
+          "voip",
+          "audio"
+        ]
+      },
+      "bitcode": false
     },
     "android": {
       "adaptiveIcon": {
@@ -28,9 +34,20 @@
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.WAKE_LOCK",
+        "android.permission.BLUETOOTH"
       ]
     },
-    "plugins": ["@config-plugins/react-native-webrtc"]
+    "plugins": [
+      "@config-plugins/react-native-webrtc"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ba785776-f564-4591-b50f-fd325cc41e26"
+      }
+    }
   }
 }
