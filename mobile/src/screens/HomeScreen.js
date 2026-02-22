@@ -1,6 +1,6 @@
 /**
  * Home Screen — User list with search and call initiation.
- * Features: zdfsearch bar, user cards with avatars, online indicators, profile modal.
+ * Features: search bar, user cards with avatars, online indicators, profile modal.
  */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
