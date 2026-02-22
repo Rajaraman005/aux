@@ -4,31 +4,22 @@
     "appVersionSource": "local"
   },
   "build": {
+    "base": "mobile",
     "development": {
       "developmentClient": true,
       "distribution": "internal",
       "android": {
         "buildType": "apk",
         "gradleCommand": ":app:assembleDebug"
-      },
-      "env": {
-        "EAS_BUILD_INSTALL_CMD": "npm install"
       }
     },
     "preview": {
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      },
-      "env": {
-        "EAS_BUILD_INSTALL_CMD": "npm install"
       }
     },
-    "production": {
-      "env": {
-        "EAS_BUILD_INSTALL_CMD": "npm install"
-      }
-    }
+    "production": {}
   },
   "submit": {
     "production": {}
