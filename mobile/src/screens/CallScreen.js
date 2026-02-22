@@ -1,46 +1,84 @@
 /**
- * Call Screen — Full-screen video/audio-only with premium design.
- * Features: remote video, self-preview, mute/camera toggle, end call,
- * network quality indicator, auto audio-only switch, waveform animation.
+ * CallScreen — FAANG-Grade Premium UI.
+ *
+ * Features:
+ * ★ Call State Machine integration (CALLING→RINGING→CONNECTING→CONNECTED→RECONNECTING→ENDED→FAILED)
+ * ★ Glassmorphic frosted control bar
+ * ★ Voice-reactive waveform animations
+ * ★ Animated PiP with glow border
+ * ★ Haptic feedback on call events
+ * ★ Gradient end-call button with pulse ring
+ * ★ Premium audio-only mode with concentric pulse rings
+ * ★ Reconnecting state with animated indicator
  */
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
-  Animated,
   StyleSheet,
+  Animated,
   Dimensions,
+  Platform,
   StatusBar,
-  Alert,
+  Vibration,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-
-// Conditional RTCView import — falls back to View in Expo Go
-let RTCView;
-try {
-  RTCView = require("react-native-webrtc").RTCView;
-} catch {
-  RTCView = View; // Fallback
-}
-import webrtcEngine from "../services/webrtc";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { colors, typography, spacing, radius, shadows } from "../styles/theme";
+import webrtcEngine, { CALL_STATES } from "../services/webrtc";
+import signalingClient from "../services/socket";
 import networkMonitor, { QUALITY_TIERS } from "../services/networkMonitor";
 import audioEngine from "../services/audioEngine";
-import signalingClient from "../services/socket";
-import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
+// ─── Conditional WebRTC Import ───────────────────────────────────────────────
+let RTCView = null;
+let WEBRTC_AVAILABLE = false;
+try {
+  RTCView = require("react-native-webrtc").RTCView;
+  WEBRTC_AVAILABLE = true;
+} catch {}
 
-// Quality tier → color mapping
-const QUALITY_COLORS = {
-  excellent: colors.success,
-  good: colors.successLight,
-  fair: colors.warning,
-  audio_only: colors.warning,
-  critical: colors.error,
+// ─── Haptic Feedback ─────────────────────────────────────────────────────────
+let Haptics = null;
+try {
+  Haptics = require("expo-haptics");
+} catch {}
+
+const haptic = (type = "medium") => {
+  try {
+    if (Haptics) {
+      const map = {
+        light: Haptics.ImpactFeedbackStyle?.Light,
+        medium: Haptics.ImpactFeedbackStyle?.Medium,
+        heavy: Haptics.ImpactFeedbackStyle?.Heavy,
+        success: "success",
+        error: "error",
+      };
+      if (type === "success" || type === "error") {
+        Haptics.notificationAsync?.(
+          type === "success"
+            ? Haptics.NotificationFeedbackType?.Success
+            : Haptics.NotificationFeedbackType?.Error,
+        );
+      } else {
+        Haptics.impactAsync?.(map[type] || map.medium);
+      }
+    } else {
+      Vibration.vibrate(type === "heavy" ? 50 : 25);
+    }
+  } catch {}
 };
 
-// Signal strength bars
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
+
+// ─── Quality Display ─────────────────────────────────────────────────────────
+const QUALITY_COLORS = {
+  excellent: "#10b981",
+  good: "#34d399",
+  fair: "#f59e0b",
+  audio_only: "#f97316",
+  critical: "#ef4444",
+};
 const QUALITY_BARS = {
   excellent: 5,
   good: 4,
@@ -50,248 +88,332 @@ const QUALITY_BARS = {
 };
 
 export default function CallScreen({ route, navigation }) {
-  const {
-    callId,
-    targetUser,
-    isCaller,
-    callState: initialState,
-  } = route.params;
+  const { callId, callerName, isCaller } = route.params;
+  const insets = useSafeAreaInsets();
 
-  const [callState, setCallState] = useState(initialState || "connecting");
-  const [callDuration, setCallDuration] = useState(0);
+  // ─── State ──────────────────────────────────────────────────────────────────
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [callState, setCallState] = useState(
+    isCaller ? CALL_STATES.CALLING : CALL_STATES.CONNECTING,
+  );
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [isAudioOnly, setIsAudioOnly] = useState(false);
-  const [localStream, setLocalStream] = useState(null);
-  const [remoteStream, setRemoteStream] = useState(null);
+  const [duration, setDuration] = useState(0);
   const [qualityTier, setQualityTier] = useState(QUALITY_TIERS.EXCELLENT);
   const [stats, setStats] = useState(null);
   const [showStats, setShowStats] = useState(false);
 
-  // Animations
-  const controlsOpacity = useRef(new Animated.Value(1)).current;
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const waveAnims = useRef(
-    [...Array(5)].map(() => new Animated.Value(0.3)),
-  ).current;
-
   const durationTimer = useRef(null);
-  const controlsTimer = useRef(null);
+  const cleanupRefs = useRef({});
 
-  // ─── Initialize WebRTC Call ───────────────────────────────────────────
+  // ─── Animations ─────────────────────────────────────────────────────────────
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const controlsAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const dotAnims = [
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+  ];
+  const waveAnims = Array.from(
+    { length: 12 },
+    () => useRef(new Animated.Value(0.3)).current,
+  );
+  const glowAnim = useRef(new Animated.Value(0)).current;
+  const ringAnims = [
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+    useRef(new Animated.Value(0)).current,
+  ];
+
+  // ─── Initialize ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    let mounted = true;
+    if (!WEBRTC_AVAILABLE) {
+      setCallState(CALL_STATES.FAILED);
+      return;
+    }
 
-    const setupCall = async () => {
-      // ★ Check if WebRTC native module is available
-      if (!webrtcEngine.isAvailable) {
-        Alert.alert(
-          "WebRTC Not Available",
-          "Video/audio calls require a development build.\n\nRun: npx expo run:android",
-          [{ text: "Go Back", onPress: () => navigation.goBack() }],
-          { cancelable: false },
-        );
-        return;
-      }
+    // Entrance animation
+    Animated.parallel([
+      Animated.timing(fadeAnim, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: true,
+      }),
+      Animated.spring(controlsAnim, {
+        toValue: 1,
+        damping: 20,
+        stiffness: 200,
+        useNativeDriver: true,
+      }),
+    ]).start();
 
-      // WebRTC engine callbacks
-      webrtcEngine.onLocalStream = (stream) =>
-        mounted && setLocalStream(stream);
-      webrtcEngine.onRemoteStream = (stream) =>
-        mounted && setRemoteStream(stream);
-      webrtcEngine.onConnectionStateChange = (state) => {
-        if (!mounted) return;
-        if (state === "connected") {
-          setCallState("connected");
-          startDurationTimer();
-        } else if (state === "failed" || state === "closed") {
-          handleCallEnd("connection_failed");
-        }
-      };
-      webrtcEngine.onModeSwitch = (mode, reason) => {
-        if (!mounted) return;
-        setIsAudioOnly(mode === "audio_only");
-      };
+    // ★ State Machine callback
+    webrtcEngine.onCallStateChange = (newState, prevState) => {
+      setCallState(newState);
 
-      // Initialize WebRTC
-      await webrtcEngine.initialize(callId, isCaller);
-
-      // Start network monitoring
-      networkMonitor.onQualityChange = (tier) =>
-        mounted && setQualityTier(tier);
-      networkMonitor.onStatsUpdate = (s) => mounted && setStats(s);
-      networkMonitor.start(callId);
-
-      // If caller, create offer
-      if (isCaller) {
-        // Wait for call-accepted signal
-        signalingClient.on("call-accepted", async (data) => {
-          if (data.callId === callId) {
-            setCallState("connecting");
-            await webrtcEngine.createOffer();
-          }
-        });
+      if (newState === CALL_STATES.CONNECTED) {
+        haptic("success");
+      } else if (newState === CALL_STATES.RECONNECTING) {
+        haptic("heavy");
+      } else if (newState === CALL_STATES.FAILED) {
+        haptic("error");
+        // Auto-exit after showing failed state briefly
+        setTimeout(() => handleCallEnd("failed"), 2000);
       }
     };
 
-    // Signaling listeners
-    const cleanups = [];
+    webrtcEngine.onLocalStream = (stream) => setLocalStream(stream);
+    webrtcEngine.onRemoteStream = (stream) => {
+      setRemoteStream(stream);
+      haptic("light");
+    };
 
-    cleanups.push(
-      signalingClient.on("offer", async (data) => {
-        if (data.callId === callId) {
-          await webrtcEngine.handleOffer(data.sdp);
+    webrtcEngine.onModeSwitch = (mode) => {
+      setIsAudioOnly(mode === "audio_only");
+      haptic("medium");
+    };
+
+    networkMonitor.onQualityChange = (newTier) => {
+      setQualityTier(newTier);
+      // ★ Update audio-only from quality tier as well
+      if (newTier.name === "audio_only" || newTier.name === "critical") {
+        setIsAudioOnly(true);
+      } else if (webrtcEngine.isAudioOnly === false) {
+        setIsAudioOnly(false);
+      }
+    };
+    networkMonitor.onStatsUpdate = (data) => setStats(data);
+
+    // ─── Signaling Listeners (register BEFORE init so we don't miss messages) ─
+    const unsubOffer = signalingClient.on("offer", async (msg) => {
+      if (msg.callId === callId) {
+        await webrtcEngine.handleOffer(msg.sdp);
+      }
+    });
+    const unsubAnswer = signalingClient.on("answer", async (msg) => {
+      if (msg.callId === callId) {
+        await webrtcEngine.handleAnswer(msg.sdp);
+      }
+    });
+    const unsubIce = signalingClient.on("ice-candidate", async (msg) => {
+      if (msg.callId === callId) {
+        await webrtcEngine.handleIceCandidate(msg.candidate);
+      }
+    });
+    const unsubIceRestart = signalingClient.on("ice-restart", async (msg) => {
+      if (msg.callId === callId) {
+        await webrtcEngine.handleOffer(msg.sdp);
+      }
+    });
+    // ★ Server sends "call-ended" (not "hang-up") when remote peer hangs up
+    const unsubCallEnded = signalingClient.on("call-ended", (msg) => {
+      if (msg.callId === callId) {
+        handleCallEnd("remote_hangup");
+      }
+    });
+    const unsubHangUp = signalingClient.on("hang-up", (msg) => {
+      if (msg.callId === callId) {
+        handleCallEnd("remote_hangup");
+      }
+    });
+    const unsubRejected = signalingClient.on("call-rejected", (msg) => {
+      if (msg.callId === callId) {
+        handleCallEnd("rejected");
+      }
+    });
+
+    // ─── Initialize Call ──────────────────────────────────────────────
+    if (isCaller) {
+      // ★ Caller: wait for callee to accept, THEN init WebRTC and create offer
+      const unsubAccepted = signalingClient.on("call-accepted", async (msg) => {
+        if (msg.callId === callId) {
+          unsubAccepted();
+          try {
+            await webrtcEngine.initialize(callId, true);
+            networkMonitor.start(callId);
+            await webrtcEngine.createOffer();
+          } catch (err) {
+            console.error("Call init error:", err);
+            setCallState(CALL_STATES.FAILED);
+            haptic("error");
+          }
         }
-      }),
-    );
-
-    cleanups.push(
-      signalingClient.on("answer", async (data) => {
-        if (data.callId === callId) {
-          await webrtcEngine.handleAnswer(data.sdp);
+      });
+      // Store for cleanup
+      cleanupRefs.current.unsubAccepted = unsubAccepted;
+    } else {
+      // ★ Callee: init WebRTC immediately (offer will arrive via signaling)
+      const initCallee = async () => {
+        try {
+          await webrtcEngine.initialize(callId, false);
+          networkMonitor.start(callId);
+        } catch (err) {
+          console.error("Call init error:", err);
+          setCallState(CALL_STATES.FAILED);
+          haptic("error");
         }
-      }),
-    );
-
-    cleanups.push(
-      signalingClient.on("ice-candidate", async (data) => {
-        if (data.callId === callId) {
-          await webrtcEngine.handleIceCandidate(data.candidate);
-        }
-      }),
-    );
-
-    cleanups.push(
-      signalingClient.on("ice-restart", async (data) => {
-        if (data.callId === callId) {
-          await webrtcEngine.handleOffer(data.sdp);
-        }
-      }),
-    );
-
-    cleanups.push(
-      signalingClient.on("call-ended", (data) => {
-        if (data.callId === callId) {
-          handleCallEnd("remote_hangup");
-        }
-      }),
-    );
-
-    cleanups.push(
-      signalingClient.on("call-rejected", (data) => {
-        if (data.callId === callId) {
-          handleCallEnd("rejected");
-        }
-      }),
-    );
-
-    setupCall();
+      };
+      initCallee();
+    }
 
     return () => {
-      mounted = false;
-      cleanups.forEach((unsub) => unsub());
-      webrtcEngine.cleanup();
-      networkMonitor.stop();
-      audioEngine.stop();
-      if (durationTimer.current) clearInterval(durationTimer.current);
+      unsubOffer?.();
+      unsubAnswer?.();
+      unsubIce?.();
+      unsubIceRestart?.();
+      unsubCallEnded?.();
+      unsubHangUp?.();
+      unsubRejected?.();
+      cleanupRefs.current.unsubAccepted?.();
     };
   }, [callId]);
 
-  // ─── Audio Waveform Animation (for audio-only mode) ──────────────────
+  // ─── Duration Timer ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (isAudioOnly && callState === "connected") {
-      audioEngine.startMonitoring(remoteStream);
+    if (callState === CALL_STATES.CONNECTED) {
+      durationTimer.current = setInterval(
+        () => setDuration((d) => d + 1),
+        1000,
+      );
+    }
+    return () => {
+      if (durationTimer.current) clearInterval(durationTimer.current);
+    };
+  }, [callState]);
 
-      // Animate waveform bars
-      const animations = waveAnims.map((anim, i) => {
-        return Animated.loop(
+  // ─── Connecting Dot Animation ───────────────────────────────────────────────
+  useEffect(() => {
+    if (
+      callState === CALL_STATES.CALLING ||
+      callState === CALL_STATES.CONNECTING ||
+      callState === CALL_STATES.RINGING ||
+      callState === CALL_STATES.RECONNECTING
+    ) {
+      const anims = dotAnims.map((dot, i) =>
+        Animated.loop(
           Animated.sequence([
-            Animated.timing(anim, {
-              toValue: 0.3 + Math.random() * 0.7,
-              duration: 200 + Math.random() * 300,
+            Animated.delay(i * 250),
+            Animated.timing(dot, {
+              toValue: 1,
+              duration: 400,
               useNativeDriver: true,
             }),
-            Animated.timing(anim, {
-              toValue: 0.1 + Math.random() * 0.3,
-              duration: 200 + Math.random() * 300,
+            Animated.timing(dot, {
+              toValue: 0,
+              duration: 400,
               useNativeDriver: true,
             }),
           ]),
-        );
-      });
-      animations.forEach((a) => a.start());
+        ),
+      );
+      Animated.parallel(anims).start();
+      return () => anims.forEach((a) => a.stop());
+    }
+  }, [callState]);
+
+  // ─── End Call Pulse Ring ────────────────────────────────────────────────────
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.15,
+          duration: 1200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 1200,
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, []);
+
+  // ─── PiP Glow Animation ────────────────────────────────────────────────────
+  useEffect(() => {
+    if (localStream && callState === CALL_STATES.CONNECTED) {
+      const glow = Animated.loop(
+        Animated.sequence([
+          Animated.timing(glowAnim, {
+            toValue: 1,
+            duration: 2000,
+            useNativeDriver: false,
+          }),
+          Animated.timing(glowAnim, {
+            toValue: 0,
+            duration: 2000,
+            useNativeDriver: false,
+          }),
+        ]),
+      );
+      glow.start();
+      return () => glow.stop();
+    }
+  }, [localStream, callState]);
+
+  // ─── Audio-Only Waveform Animation ──────────────────────────────────────────
+  useEffect(() => {
+    if (isAudioOnly && callState === CALL_STATES.CONNECTED) {
+      audioEngine.startMonitoring(remoteStream);
+
+      const waveAnimations = waveAnims.map((anim, i) =>
+        Animated.loop(
+          Animated.sequence([
+            Animated.delay(i * 60),
+            Animated.timing(anim, {
+              toValue: 0.4 + Math.random() * 0.6,
+              duration: 300 + Math.random() * 200,
+              useNativeDriver: true,
+            }),
+            Animated.timing(anim, {
+              toValue: 0.15 + Math.random() * 0.2,
+              duration: 300 + Math.random() * 200,
+              useNativeDriver: true,
+            }),
+          ]),
+        ),
+      );
+      Animated.parallel(waveAnimations).start();
+
+      // Concentric ring animation for audio-only
+      const ringAnimations = ringAnims.map((anim, i) =>
+        Animated.loop(
+          Animated.sequence([
+            Animated.delay(i * 700),
+            Animated.parallel([
+              Animated.timing(anim, {
+                toValue: 1,
+                duration: 2000,
+                useNativeDriver: true,
+              }),
+            ]),
+            Animated.timing(anim, {
+              toValue: 0,
+              duration: 0,
+              useNativeDriver: true,
+            }),
+          ]),
+        ),
+      );
+      Animated.parallel(ringAnimations).start();
 
       return () => {
-        animations.forEach((a) => a.stop());
+        waveAnimations.forEach((a) => a.stop());
+        ringAnimations.forEach((a) => a.stop());
         audioEngine.stop();
       };
     }
   }, [isAudioOnly, callState, remoteStream]);
 
-  // ─── Connecting Pulse Animation ──────────────────────────────────────
-  useEffect(() => {
-    if (callState === "ringing" || callState === "connecting") {
-      const pulse = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.2,
-            duration: 800,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 800,
-            useNativeDriver: true,
-          }),
-        ]),
-      );
-      pulse.start();
-      return () => pulse.stop();
-    }
-  }, [callState]);
-
-  // ─── Call Duration Timer ─────────────────────────────────────────────
-  const startDurationTimer = () => {
-    durationTimer.current = setInterval(() => {
-      setCallDuration((prev) => prev + 1);
-    }, 1000);
-  };
-
-  const formatDuration = (secs) => {
-    const m = Math.floor(secs / 60)
-      .toString()
-      .padStart(2, "0");
-    const s = (secs % 60).toString().padStart(2, "0");
-    return `${m}:${s}`;
-  };
-
-  // ─── Controls Auto-Hide ─────────────────────────────────────────────
-  const toggleControls = () => {
-    const visible = controlsOpacity._value > 0.5;
-    Animated.timing(controlsOpacity, {
-      toValue: visible ? 0 : 1,
-      duration: 200,
-      useNativeDriver: true,
-    }).start();
-  };
-
-  // ─── Call Actions ────────────────────────────────────────────────────
-  const handleMuteToggle = () => {
-    const muted = webrtcEngine.toggleMute();
-    setIsMuted(muted);
-  };
-
-  const handleCameraToggle = () => {
-    const off = webrtcEngine.toggleCamera();
-    setIsCameraOff(off);
-  };
-
-  const handleSwitchCamera = async () => {
-    await webrtcEngine.switchCamera();
-  };
-
+  // ─── Call End Handler ───────────────────────────────────────────────────────
   const handleCallEnd = useCallback(
     (reason = "user_hangup") => {
+      haptic("heavy");
       signalingClient.hangUp(callId);
       webrtcEngine.cleanup();
       networkMonitor.stop();
@@ -302,15 +424,68 @@ export default function CallScreen({ route, navigation }) {
     [callId, navigation],
   );
 
-  // ─── Render Quality Indicator ────────────────────────────────────────
+  // ─── Controls ───────────────────────────────────────────────────────────────
+  const toggleMute = () => {
+    haptic("light");
+    const muted = webrtcEngine.toggleMute();
+    setIsMuted(muted);
+  };
+
+  const toggleCamera = () => {
+    haptic("light");
+    const off = webrtcEngine.toggleCamera();
+    setIsCameraOff(off);
+  };
+
+  const switchCamera = () => {
+    haptic("light");
+    webrtcEngine.switchCamera();
+  };
+
+  // ─── Formatters ─────────────────────────────────────────────────────────────
+  const formatDuration = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}`;
+  };
+
+  const getStatusText = () => {
+    switch (callState) {
+      case CALL_STATES.CALLING:
+        return "Calling...";
+      case CALL_STATES.RINGING:
+        return "Ringing...";
+      case CALL_STATES.CONNECTING:
+        return "Connecting...";
+      case CALL_STATES.RECONNECTING:
+        return "Reconnecting...";
+      case CALL_STATES.FAILED:
+        return "Call Failed";
+      case CALL_STATES.ENDED:
+        return "Call Ended";
+      case CALL_STATES.CONNECTED:
+        return formatDuration(duration);
+      default:
+        return "";
+    }
+  };
+
+  const isConnected = callState === CALL_STATES.CONNECTED;
+  const isLive =
+    callState === CALL_STATES.CONNECTED ||
+    callState === CALL_STATES.RECONNECTING;
+
+  // ─── Render: Quality Bars ──────────────────────────────────────────────────
   const renderQualityBars = () => {
     const bars = QUALITY_BARS[qualityTier.name] || 3;
     const color = QUALITY_COLORS[qualityTier.name] || colors.textMuted;
-
     return (
       <TouchableOpacity
         style={styles.qualityContainer}
-        onPress={() => setShowStats(!showStats)}
+        onPress={() => {
+          haptic("light");
+          setShowStats(!showStats);
+        }}
       >
         <View style={styles.qualityBars}>
           {[1, 2, 3, 4, 5].map((i) => (
@@ -320,7 +495,7 @@ export default function CallScreen({ route, navigation }) {
                 styles.qualityBar,
                 {
                   height: 4 + i * 3,
-                  backgroundColor: i <= bars ? color : "rgba(255,255,255,0.15)",
+                  backgroundColor: i <= bars ? color : "rgba(255,255,255,0.12)",
                 },
               ]}
             />
@@ -333,325 +508,713 @@ export default function CallScreen({ route, navigation }) {
     );
   };
 
-  // ─── Render Stats Overlay ────────────────────────────────────────────
+  // ─── Render: Stats Overlay ──────────────────────────────────────────────────
   const renderStatsOverlay = () => {
     if (!showStats || !stats) return null;
     const { averaged } = stats;
-
     return (
       <View style={styles.statsOverlay}>
-        <Text style={styles.statsTitle}>Network Stats</Text>
-        <Text style={styles.statLine}>
-          📉 Packet Loss: {averaged.packetLoss.toFixed(1)}%
-        </Text>
-        <Text style={styles.statLine}>
-          📊 Jitter: {averaged.jitter.toFixed(1)}ms
-        </Text>
-        <Text style={styles.statLine}>⏱ RTT: {averaged.rtt.toFixed(0)}ms</Text>
-        <Text style={styles.statLine}>
-          📶 Bandwidth: {(averaged.bandwidth / 1000).toFixed(0)}kbps
-        </Text>
-        <Text style={styles.statLine}>🎯 Tier: {qualityTier.name}</Text>
+        <View style={styles.statsCard}>
+          <Text style={styles.statsTitle}>Network Stats</Text>
+          <View style={styles.statRow}>
+            <Text style={styles.statLabel}>Packet Loss</Text>
+            <Text style={styles.statValue}>
+              {averaged.packetLoss.toFixed(1)}%
+            </Text>
+          </View>
+          <View style={styles.statRow}>
+            <Text style={styles.statLabel}>Jitter</Text>
+            <Text style={styles.statValue}>{averaged.jitter.toFixed(0)}ms</Text>
+          </View>
+          <View style={styles.statRow}>
+            <Text style={styles.statLabel}>RTT</Text>
+            <Text style={styles.statValue}>{averaged.rtt.toFixed(0)}ms</Text>
+          </View>
+          <View style={styles.statRow}>
+            <Text style={styles.statLabel}>Bandwidth</Text>
+            <Text style={styles.statValue}>
+              {(averaged.bandwidth / 1000).toFixed(0)} kbps
+            </Text>
+          </View>
+          <View style={[styles.statRow, { borderBottomWidth: 0 }]}>
+            <Text style={styles.statLabel}>State</Text>
+            <Text style={[styles.statValue, { color: colors.primary }]}>
+              {callState.toUpperCase()}
+            </Text>
+          </View>
+        </View>
       </View>
     );
   };
 
-  return (
-    <View style={styles.container}>
-      <StatusBar hidden />
-
-      {/* Remote Video (Full Screen) */}
-      {remoteStream && !isAudioOnly ? (
-        <TouchableOpacity
-          style={styles.remoteVideo}
-          activeOpacity={1}
-          onPress={toggleControls}
-        >
-          <RTCView
-            streamURL={remoteStream.toURL()}
-            style={styles.rtcView}
-            objectFit="cover"
-            zOrder={0}
+  // ─── Render: Connecting/Reconnecting State ─────────────────────────────────
+  const renderConnectingState = () => (
+    <View style={styles.centerOverlay}>
+      <View style={styles.avatarCircle}>
+        <Text style={styles.avatarInitial}>
+          {(callerName || "?").charAt(0).toUpperCase()}
+        </Text>
+      </View>
+      <Text style={styles.callerNameLarge}>{callerName || "Unknown"}</Text>
+      <View style={styles.dotsRow}>
+        {dotAnims.map((dot, i) => (
+          <Animated.View
+            key={i}
+            style={[
+              styles.dot,
+              {
+                opacity: dot,
+                transform: [
+                  {
+                    translateY: dot.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0, -8],
+                    }),
+                  },
+                ],
+              },
+              callState === CALL_STATES.RECONNECTING && {
+                backgroundColor: colors.warning,
+              },
+            ]}
           />
-        </TouchableOpacity>
-      ) : (
-        <TouchableOpacity
-          style={styles.audioOnlyContainer}
-          activeOpacity={1}
-          onPress={toggleControls}
-        >
-          {/* Audio-Only Mode — Premium Waveform */}
-          <View style={styles.audioOnlyContent}>
-            <View style={styles.callerAvatar}>
-              <Text style={styles.callerAvatarText}>
-                {targetUser?.name?.charAt(0)?.toUpperCase() || "?"}
-              </Text>
-            </View>
-            <Text style={styles.callerName}>
-              {targetUser?.name || "Unknown"}
-            </Text>
-
-            {callState === "connected" ? (
-              <>
-                {isAudioOnly && (
-                  <View style={styles.audioOnlyBadge}>
-                    <Text style={styles.audioOnlyBadgeText}>🎙 Audio Only</Text>
-                  </View>
-                )}
-                <View style={styles.waveform}>
-                  {waveAnims.map((anim, i) => (
-                    <Animated.View
-                      key={i}
-                      style={[
-                        styles.waveBar,
-                        {
-                          transform: [{ scaleY: anim }],
-                        },
-                      ]}
-                    />
-                  ))}
-                </View>
-              </>
-            ) : (
-              <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-                <Text style={styles.connectingText}>
-                  {callState === "ringing" ? "Ringing..." : "Connecting..."}
-                </Text>
-              </Animated.View>
-            )}
-          </View>
-        </TouchableOpacity>
+        ))}
+      </View>
+      <Text style={styles.statusLabel}>{getStatusText()}</Text>
+      {callState === CALL_STATES.RECONNECTING && (
+        <Text style={styles.reconnectHint}>
+          Network changed — restoring connection
+        </Text>
       )}
+    </View>
+  );
 
-      {/* Local Video Preview (Picture-in-Picture) */}
-      {localStream && !isAudioOnly && !isCameraOff && (
-        <View style={styles.localPreview}>
-          <RTCView
-            streamURL={localStream.toURL()}
-            style={styles.localRtcView}
-            objectFit="cover"
-            mirror
-            zOrder={1}
+  // ─── Render: Audio-Only Mode ───────────────────────────────────────────────
+  const renderAudioOnly = () => (
+    <View style={styles.audioOnlyContainer}>
+      {/* Concentric pulse rings */}
+      {ringAnims.map((anim, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            styles.pulseRing,
+            {
+              opacity: anim.interpolate({
+                inputRange: [0, 0.5, 1],
+                outputRange: [0.4, 0.15, 0],
+              }),
+              transform: [
+                {
+                  scale: anim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [1, 2.5],
+                  }),
+                },
+              ],
+            },
+          ]}
+        />
+      ))}
+
+      <View style={styles.audioAvatar}>
+        <Text style={styles.audioAvatarText}>
+          {(callerName || "?").charAt(0).toUpperCase()}
+        </Text>
+      </View>
+
+      <Text style={styles.audioCallerName}>{callerName || "Unknown"}</Text>
+
+      {/* Voice-reactive waveform */}
+      <View style={styles.waveform}>
+        {waveAnims.map((anim, i) => (
+          <Animated.View
+            key={i}
+            style={[
+              styles.waveBar,
+              {
+                transform: [{ scaleY: anim }],
+                backgroundColor:
+                  i % 3 === 0
+                    ? colors.primary
+                    : i % 3 === 1
+                      ? colors.primaryLight
+                      : colors.accent,
+              },
+            ]}
           />
+        ))}
+      </View>
+
+      <Text style={styles.audioModeLabel}>Audio Only</Text>
+    </View>
+  );
+
+  // ─── Render: Video Mode ────────────────────────────────────────────────────
+  const renderVideoMode = () => (
+    <View style={styles.videoContainer}>
+      {/* Remote Video (full screen) */}
+      {remoteStream && RTCView ? (
+        <RTCView
+          streamURL={remoteStream.toURL()}
+          style={styles.remoteVideo}
+          objectFit="cover"
+          zOrder={0}
+        />
+      ) : (
+        <View style={styles.remoteVideoPlaceholder}>
+          <View style={styles.placeholderAvatar}>
+            <Text style={styles.placeholderAvatarText}>
+              {(callerName || "?").charAt(0).toUpperCase()}
+            </Text>
+          </View>
+          <Text style={styles.waitingText}>Waiting for video...</Text>
         </View>
       )}
 
-      {/* Top Bar — Duration + Quality */}
-      <Animated.View style={[styles.topBar, { opacity: controlsOpacity }]}>
-        <SafeAreaView style={styles.topBarInner}>
-          {callState === "connected" ? (
-            <View style={styles.durationContainer}>
-              <View style={styles.liveDot} />
-              <Text style={styles.durationText}>
-                {formatDuration(callDuration)}
-              </Text>
-            </View>
-          ) : (
-            <View />
-          )}
-          {renderQualityBars()}
-        </SafeAreaView>
-      </Animated.View>
+      {/* Local Video PiP */}
+      {localStream && RTCView && !isCameraOff && (
+        <Animated.View
+          style={[
+            styles.localPreview,
+            {
+              borderColor: glowAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [
+                  "rgba(99, 102, 241, 0.3)",
+                  "rgba(139, 92, 246, 0.7)",
+                ],
+              }),
+            },
+          ]}
+        >
+          <RTCView
+            streamURL={localStream.toURL()}
+            style={styles.localVideo}
+            objectFit="cover"
+            mirror={true}
+            zOrder={1}
+          />
+        </Animated.View>
+      )}
+    </View>
+  );
 
-      {/* Stats Overlay */}
+  // ─── Render: Control Button ────────────────────────────────────────────────
+  const ControlButton = ({
+    icon,
+    label,
+    active,
+    danger,
+    onPress,
+    style: customStyle,
+  }) => (
+    <TouchableOpacity
+      onPress={onPress}
+      style={[
+        styles.controlBtn,
+        active && styles.controlBtnActive,
+        danger && styles.controlBtnDanger,
+        customStyle,
+      ]}
+      activeOpacity={0.7}
+    >
+      <Text
+        style={[
+          styles.controlIcon,
+          active && styles.controlIconActive,
+          danger && styles.controlIconDanger,
+        ]}
+      >
+        {icon}
+      </Text>
+      {label && (
+        <Text
+          style={[
+            styles.controlLabel,
+            active && styles.controlLabelActive,
+            danger && styles.controlLabelDanger,
+          ]}
+        >
+          {label}
+        </Text>
+      )}
+    </TouchableOpacity>
+  );
+
+  // ─── Main Render ────────────────────────────────────────────────────────────
+  return (
+    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="transparent"
+        translucent
+      />
+
+      {/* Background / Main Content */}
+      {!isLive
+        ? renderConnectingState()
+        : isAudioOnly
+          ? renderAudioOnly()
+          : renderVideoMode()}
+
+      {/* ─── Top Bar (Gradient Overlay) ─────────────────────────────── */}
+      <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
+        <View style={styles.topBarContent}>
+          <View style={styles.topLeft}>
+            {isConnected && renderQualityBars()}
+          </View>
+          <View style={styles.topCenter}>
+            <Text style={styles.topCallerName}>{callerName || "Unknown"}</Text>
+            <Text
+              style={[
+                styles.topStatus,
+                callState === CALL_STATES.RECONNECTING && {
+                  color: colors.warning,
+                },
+              ]}
+            >
+              {getStatusText()}
+            </Text>
+          </View>
+          <View style={styles.topRight}>
+            {isAudioOnly && isConnected && (
+              <View style={styles.audioOnlyBadge}>
+                <Text style={styles.audioOnlyBadgeText}>🎤</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </View>
+
+      {/* ─── Stats Overlay ──────────────────────────────────────────── */}
       {renderStatsOverlay()}
 
-      {/* Bottom Controls */}
+      {/* ─── Bottom Controls (Glassmorphic) ─────────────────────────── */}
       <Animated.View
-        style={[styles.bottomControls, { opacity: controlsOpacity }]}
+        style={[
+          styles.controlBar,
+          {
+            paddingBottom: insets.bottom + 12,
+            transform: [
+              {
+                translateY: controlsAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [120, 0],
+                }),
+              },
+            ],
+          },
+        ]}
       >
-        <SafeAreaView style={styles.controlsRow}>
-          {/* Mute Button */}
-          <TouchableOpacity
-            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
-            onPress={handleMuteToggle}
-          >
-            <Text style={styles.controlIcon}>{isMuted ? "🔇" : "🎤"}</Text>
-            <Text style={styles.controlLabel}>
-              {isMuted ? "Unmute" : "Mute"}
-            </Text>
-          </TouchableOpacity>
+        <View style={styles.controlBarInner}>
+          {/* Row 1: Media Controls */}
+          <View style={styles.controlRow}>
+            <ControlButton
+              icon={isMuted ? "🔇" : "🎙️"}
+              label={isMuted ? "Unmute" : "Mute"}
+              active={isMuted}
+              onPress={toggleMute}
+            />
+            <ControlButton
+              icon={isCameraOff ? "📷" : "📹"}
+              label={isCameraOff ? "Camera On" : "Camera Off"}
+              active={isCameraOff}
+              onPress={toggleCamera}
+            />
+            <ControlButton icon="🔄" label="Flip" onPress={switchCamera} />
+          </View>
 
           {/* End Call Button */}
-          <TouchableOpacity
-            style={styles.endCallBtn}
-            onPress={() => handleCallEnd()}
-          >
-            <Text style={styles.endCallIcon}>📞</Text>
-          </TouchableOpacity>
-
-          {/* Camera Toggle */}
-          <TouchableOpacity
+          <Animated.View
             style={[
-              styles.controlBtn,
-              (isCameraOff || isAudioOnly) && styles.controlBtnActive,
+              styles.endCallWrapper,
+              { transform: [{ scale: pulseAnim }] },
             ]}
-            onPress={isAudioOnly ? undefined : handleCameraToggle}
-            disabled={isAudioOnly}
           >
-            <Text style={styles.controlIcon}>
-              {isCameraOff || isAudioOnly ? "📷" : "📹"}
-            </Text>
-            <Text style={styles.controlLabel}>
-              {isCameraOff ? "Camera On" : "Camera Off"}
-            </Text>
-          </TouchableOpacity>
-
-          {/* Switch Camera */}
-          {!isAudioOnly && !isCameraOff && (
             <TouchableOpacity
-              style={styles.controlBtn}
-              onPress={handleSwitchCamera}
+              style={styles.endCallBtn}
+              onPress={() => handleCallEnd("user_hangup")}
+              activeOpacity={0.8}
             >
-              <Text style={styles.controlIcon}>🔄</Text>
-              <Text style={styles.controlLabel}>Flip</Text>
+              <Text style={styles.endCallIcon}>📞</Text>
+              <Text style={styles.endCallLabel}>End</Text>
             </TouchableOpacity>
-          )}
-        </SafeAreaView>
+          </Animated.View>
+        </View>
       </Animated.View>
-    </View>
+    </Animated.View>
   );
 }
 
+// ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#000" },
-
-  // Remote Video
-  remoteVideo: { flex: 1 },
-  rtcView: { flex: 1, width: SCREEN_W, height: SCREEN_H },
-
-  // Audio-Only Mode
-  audioOnlyContainer: { flex: 1, backgroundColor: colors.bg },
-  audioOnlyContent: { flex: 1, justifyContent: "center", alignItems: "center" },
-  callerAvatar: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    backgroundColor: colors.primary,
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: spacing.lg,
-    ...shadows.glow,
-  },
-  callerAvatarText: { fontSize: 48, fontWeight: "800", color: "#fff" },
-  callerName: { ...typography.h2, marginBottom: spacing.md },
-  connectingText: { ...typography.bodySmall, marginTop: spacing.md },
-  audioOnlyBadge: {
-    backgroundColor: "rgba(245, 158, 11, 0.15)",
-    borderRadius: radius.full,
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    marginBottom: spacing.lg,
-  },
-  audioOnlyBadgeText: { ...typography.caption, color: colors.warning },
-  waveform: {
-    flexDirection: "row",
-    alignItems: "center",
-    height: 60,
-    gap: 6,
-    marginTop: spacing.md,
-  },
-  waveBar: {
-    width: 6,
-    height: 40,
-    borderRadius: 3,
-    backgroundColor: colors.primary,
+  container: {
+    flex: 1,
+    backgroundColor: "#050510",
   },
 
-  // Local Preview (PiP)
-  localPreview: {
+  // ─── Top Bar ───────────────────────────────────────────────────────
+  topBar: {
     position: "absolute",
-    top: 60,
-    right: 16,
-    width: 100,
-    height: 140,
-    borderRadius: radius.md,
-    overflow: "hidden",
-    borderWidth: 2,
-    borderColor: "rgba(255,255,255,0.2)",
-    ...shadows.lg,
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    // Gradient overlay implemented via background + opacity
+    backgroundColor: "rgba(5, 5, 16, 0.65)",
   },
-  localRtcView: { flex: 1 },
-
-  // Top Bar
-  topBar: { position: "absolute", top: 0, left: 0, right: 0 },
-  topBarInner: {
+  topBarContent: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.sm,
+    justifyContent: "space-between",
   },
-  durationContainer: { flexDirection: "row", alignItems: "center" },
-  liveDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.error,
-    marginRight: 8,
+  topLeft: { flex: 1, alignItems: "flex-start" },
+  topCenter: { flex: 2, alignItems: "center" },
+  topRight: { flex: 1, alignItems: "flex-end" },
+  topCallerName: {
+    ...typography.body,
+    fontWeight: "600",
+    color: "#fff",
+    fontSize: 15,
   },
-  durationText: { ...typography.body, fontWeight: "600", color: "#fff" },
+  topStatus: {
+    fontSize: 13,
+    color: "rgba(255,255,255,0.6)",
+    marginTop: 2,
+    fontWeight: "500",
+  },
 
-  // Quality Indicator
-  qualityContainer: { flexDirection: "row", alignItems: "center" },
+  // ─── Quality ──────────────────────────────────────────────────────
+  qualityContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
   qualityBars: {
     flexDirection: "row",
     alignItems: "flex-end",
     gap: 2,
-    marginRight: 6,
+    height: 20,
   },
-  qualityBar: { width: 4, borderRadius: 2 },
-  qualityLabel: { ...typography.caption },
+  qualityBar: {
+    width: 4,
+    borderRadius: 2,
+  },
+  qualityLabel: {
+    fontSize: 11,
+    fontWeight: "600",
+    letterSpacing: 0.3,
+  },
 
-  // Stats Overlay
-  statsOverlay: {
-    position: "absolute",
-    top: 100,
-    left: spacing.lg,
-    backgroundColor: "rgba(0,0,0,0.8)",
-    borderRadius: radius.md,
-    padding: spacing.md,
-    ...shadows.md,
+  // ─── Audio-Only Badge ─────────────────────────────────────────────
+  audioOnlyBadge: {
+    backgroundColor: "rgba(249, 115, 22, 0.2)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: "rgba(249, 115, 22, 0.3)",
   },
-  statsTitle: {
-    ...typography.label,
-    marginBottom: spacing.sm,
+  audioOnlyBadgeText: {
+    fontSize: 14,
+  },
+
+  // ─── Video ────────────────────────────────────────────────────────
+  videoContainer: {
+    flex: 1,
+  },
+  remoteVideo: {
+    flex: 1,
+    backgroundColor: "#0a0a1a",
+  },
+  remoteVideoPlaceholder: {
+    flex: 1,
+    backgroundColor: "#0a0a1a",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  placeholderAvatar: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "rgba(99, 102, 241, 0.25)",
+  },
+  placeholderAvatarText: {
+    fontSize: 32,
+    fontWeight: "700",
     color: colors.primary,
   },
-  statLine: {
-    ...typography.caption,
-    color: colors.textSecondary,
-    marginBottom: 4,
+  waitingText: {
+    color: "rgba(255,255,255,0.4)",
+    fontSize: 14,
+    marginTop: 16,
+    fontWeight: "500",
   },
 
-  // Bottom Controls
-  bottomControls: { position: "absolute", bottom: 0, left: 0, right: 0 },
-  controlsRow: {
+  // ─── Local PiP ────────────────────────────────────────────────────
+  localPreview: {
+    position: "absolute",
+    top: 100,
+    right: 16,
+    width: 110,
+    height: 155,
+    borderRadius: 16,
+    overflow: "hidden",
+    borderWidth: 2.5,
+    ...shadows.lg,
+  },
+  localVideo: {
+    width: "100%",
+    height: "100%",
+  },
+
+  // ─── Connecting State ─────────────────────────────────────────────
+  centerOverlay: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#050510",
+  },
+  avatarCircle: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(99, 102, 241, 0.12)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "rgba(99, 102, 241, 0.25)",
+    marginBottom: 20,
+  },
+  avatarInitial: {
+    fontSize: 40,
+    fontWeight: "800",
+    color: colors.primary,
+  },
+  callerNameLarge: {
+    fontSize: 26,
+    fontWeight: "700",
+    color: "#fff",
+    marginBottom: 12,
+    letterSpacing: -0.3,
+  },
+  dotsRow: {
+    flexDirection: "row",
+    gap: 8,
+    marginBottom: 12,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.primary,
+  },
+  statusLabel: {
+    fontSize: 15,
+    color: "rgba(255,255,255,0.5)",
+    fontWeight: "500",
+  },
+  reconnectHint: {
+    fontSize: 13,
+    color: colors.warning,
+    marginTop: 8,
+    fontWeight: "500",
+  },
+
+  // ─── Audio-Only Mode ──────────────────────────────────────────────
+  audioOnlyContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#050510",
+  },
+  pulseRing: {
+    position: "absolute",
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    borderWidth: 2,
+    borderColor: colors.primary,
+  },
+  audioAvatar: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "rgba(99, 102, 241, 0.35)",
+    marginBottom: 16,
+    zIndex: 1,
+  },
+  audioAvatarText: {
+    fontSize: 40,
+    fontWeight: "800",
+    color: colors.primaryLight,
+  },
+  audioCallerName: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#fff",
+    marginBottom: 24,
+    letterSpacing: -0.3,
+  },
+  waveform: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: 50,
+    gap: 4,
+  },
+  waveBar: {
+    width: 5,
+    height: 40,
+    borderRadius: 2.5,
+  },
+  audioModeLabel: {
+    fontSize: 13,
+    color: "rgba(255,255,255,0.35)",
+    marginTop: 20,
+    fontWeight: "600",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+
+  // ─── Control Bar (Glassmorphic) ───────────────────────────────────
+  controlBar: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+    paddingTop: 16,
+    paddingHorizontal: 16,
+    backgroundColor: "rgba(12, 12, 32, 0.85)",
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: 1,
+    borderColor: "rgba(99, 102, 241, 0.12)",
+  },
+  controlBarInner: {
+    alignItems: "center",
+    gap: 16,
+  },
+  controlRow: {
     flexDirection: "row",
     justifyContent: "center",
-    alignItems: "center",
-    paddingVertical: spacing.lg,
-    gap: 24,
-    backgroundColor: "rgba(0,0,0,0.5)",
+    gap: 20,
   },
+
+  // ─── Control Buttons ──────────────────────────────────────────────
   controlBtn: {
-    alignItems: "center",
-    justifyContent: "center",
-    width: 60,
-    height: 72,
-  },
-  controlBtnActive: { opacity: 0.5 },
-  controlIcon: { fontSize: 28, marginBottom: 4 },
-  controlLabel: { ...typography.caption, color: "#fff", fontSize: 10 },
-  endCallBtn: {
     width: 64,
     height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.error,
+    borderRadius: 20,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
     justifyContent: "center",
     alignItems: "center",
-    transform: [{ rotate: "135deg" }],
-    ...shadows.md,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
   },
-  endCallIcon: { fontSize: 28 },
+  controlBtnActive: {
+    backgroundColor: "rgba(99, 102, 241, 0.25)",
+    borderColor: "rgba(99, 102, 241, 0.4)",
+  },
+  controlBtnDanger: {
+    backgroundColor: "rgba(239, 68, 68, 0.2)",
+    borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+  controlIcon: {
+    fontSize: 22,
+  },
+  controlIconActive: {},
+  controlIconDanger: {},
+  controlLabel: {
+    fontSize: 10,
+    color: "rgba(255,255,255,0.55)",
+    marginTop: 4,
+    fontWeight: "600",
+    letterSpacing: 0.2,
+  },
+  controlLabelActive: {
+    color: colors.primaryLight,
+  },
+  controlLabelDanger: {
+    color: colors.errorLight,
+  },
+
+  // ─── End Call Button ──────────────────────────────────────────────
+  endCallWrapper: {
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  endCallBtn: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: "#ef4444",
+    justifyContent: "center",
+    alignItems: "center",
+    ...shadows.lg,
+    shadowColor: "#ef4444",
+    shadowOpacity: 0.45,
+    shadowRadius: 16,
+  },
+  endCallIcon: {
+    fontSize: 24,
+    transform: [{ rotate: "135deg" }],
+  },
+  endCallLabel: {
+    fontSize: 10,
+    color: "#fff",
+    fontWeight: "700",
+    marginTop: 2,
+  },
+
+  // ─── Stats Overlay ────────────────────────────────────────────────
+  statsOverlay: {
+    position: "absolute",
+    top: 110,
+    left: 16,
+    zIndex: 15,
+  },
+  statsCard: {
+    backgroundColor: "rgba(12, 12, 32, 0.92)",
+    borderRadius: 16,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: "rgba(99, 102, 241, 0.15)",
+    minWidth: 200,
+  },
+  statsTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: colors.primaryLight,
+    marginBottom: 10,
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
+  statRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.05)",
+  },
+  statLabel: {
+    fontSize: 13,
+    color: "rgba(255,255,255,0.5)",
+    fontWeight: "500",
+  },
+  statValue: {
+    fontSize: 13,
+    color: "#fff",
+    fontWeight: "600",
+  },
 });

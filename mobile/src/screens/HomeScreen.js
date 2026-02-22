@@ -1,22 +1,21 @@
 /**
- * Home Screen — User list with search and call initiation.
- * Features: search bar, user cards with avatars, online indicators, profile modal.
+ * Home Screen — Dark-themed messenger chat list.
+ * Features: greeting header, filter tabs, conversation list with real-time updates.
  */
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   View,
   Text,
-  TextInput,
   FlatList,
   TouchableOpacity,
-  Animated,
   StyleSheet,
   ActivityIndicator,
-  Modal,
   RefreshControl,
   Image,
 } from "react-native";
+import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
+import { useSignaling } from "../context/SignalingContext";
 import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import signalingClient from "../services/socket";
@@ -26,226 +25,206 @@ import {
   spacing,
   radius,
   shadows,
-  commonStyles,
 } from "../styles/theme";
 
+const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
+
+function formatTime(dateStr) {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  const now = new Date();
+  const diffMs = now - date;
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) {
+    return date.toLocaleDateString([], { weekday: "short" });
+  }
+  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
 export default function HomeScreen({ navigation }) {
-  const { user, logout, accessToken } = useAuth();
-  const [users, setUsers] = useState([]);
-  const [searchQuery, setSearchQuery] = useState("");
+  const { user } = useAuth();
+  const { onlineUsers } = useSignaling();
+  const [conversations, setConversations] = useState([]);
+  const [activeFilter, setActiveFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [onlineUsers, setOnlineUsers] = useState(new Set());
-  const [selectedUser, setSelectedUser] = useState(null);
-  const [incomingCall, setIncomingCall] = useState(null);
 
-  const modalAnim = useRef(new Animated.Value(0)).current;
-
-  // ─── Connect Signaling ───────────────────────────────────────────────
-  useEffect(() => {
-    if (accessToken) {
-      signalingClient.connect(accessToken);
-
-      // Listen for presence updates
-      const unsubPresence = signalingClient.on("presence", (data) => {
-        setOnlineUsers((prev) => {
-          const next = new Set(prev);
-          if (data.status === "online") next.add(data.userId);
-          else next.delete(data.userId);
-          return next;
-        });
-      });
-
-      // Listen for presence list
-      const unsubList = signalingClient.on("presence-list", (data) => {
-        setOnlineUsers(new Set(data.users));
-      });
-
-      // Listen for incoming calls
-      const unsubCall = signalingClient.on("incoming-call", (data) => {
-        setIncomingCall(data);
-      });
-
-      return () => {
-        unsubPresence();
-        unsubList();
-        unsubCall();
-        signalingClient.disconnect();
-      };
-    }
-  }, [accessToken]);
-
-  // ─── Fetch Users ─────────────────────────────────────────────────────
-  const fetchUsers = useCallback(async () => {
+  // ─── Fetch Conversations ───────────────────────────────────────────────
+  const fetchConversations = useCallback(async () => {
     try {
-      const url =
-        searchQuery.length >= 2
-          ? `${endpoints.users.search}?q=${encodeURIComponent(searchQuery)}`
-          : endpoints.users.list;
-      const data = await apiClient.get(url);
-      setUsers(data.users || []);
+      const data = await apiClient.get(endpoints.conversations.list);
+      setConversations(data.conversations || []);
     } catch (err) {
-      console.error("Fetch users error:", err);
+      console.error("Fetch conversations error:", err);
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [searchQuery]);
+  }, []);
 
   useEffect(() => {
-    const timer = setTimeout(fetchUsers, searchQuery ? 300 : 0); // Debounce search
-    return () => clearTimeout(timer);
-  }, [fetchUsers]);
+    fetchConversations();
+  }, [fetchConversations]);
+
+  // ─── Real-time message updates ─────────────────────────────────────────
+  useEffect(() => {
+    const unsubMsg = signalingClient.on("message-received", (data) => {
+      setConversations((prev) => {
+        const idx = prev.findIndex((c) => c.id === data.conversationId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            last_message: data.message.content,
+            last_message_at: data.message.created_at,
+            last_message_sender: data.message.sender_id,
+            unread_count: (updated[idx].unread_count || 0) + 1,
+          };
+          // Move to top
+          const [item] = updated.splice(idx, 1);
+          updated.unshift(item);
+          return updated;
+        }
+        // New conversation — refetch
+        fetchConversations();
+        return prev;
+      });
+    });
+
+    const unsubRead = signalingClient.on("messages-read", (data) => {
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === data.conversationId ? { ...c, unread_count: 0 } : c,
+        ),
+      );
+    });
+
+    return () => {
+      unsubMsg();
+      unsubRead();
+    };
+  }, [fetchConversations]);
 
   const handleRefresh = () => {
     setIsRefreshing(true);
-    fetchUsers();
+    fetchConversations();
   };
 
-  // ─── Call Actions ────────────────────────────────────────────────────
-  const handleCallUser = useCallback(
-    (targetUser) => {
-      setSelectedUser(null);
-      signalingClient.requestCall(targetUser.id);
-
-      // Listen for call status
-      const unsubRinging = signalingClient.on("call-ringing", (data) => {
-        navigation.navigate("Call", {
-          callId: data.callId,
-          targetUser,
-          isCaller: true,
-          callState: "ringing",
-        });
-        unsubRinging();
-      });
-
-      const unsubFailed = signalingClient.on("call-failed", (data) => {
-        alert(
-          data.reason === "user_offline"
-            ? "User is offline"
-            : data.reason === "target_busy"
-              ? "User is on another call"
-              : "Call failed",
-        );
-        unsubFailed();
-      });
-    },
-    [navigation],
-  );
-
-  const handleAcceptCall = useCallback(() => {
-    if (!incomingCall) return;
-    signalingClient.acceptCall(incomingCall.callId);
-    navigation.navigate("Call", {
-      callId: incomingCall.callId,
-      targetUser: { id: incomingCall.callerId, name: incomingCall.callerName },
-      isCaller: false,
-      callState: "connecting",
-    });
-    setIncomingCall(null);
-  }, [incomingCall, navigation]);
-
-  const handleRejectCall = useCallback(() => {
-    if (!incomingCall) return;
-    signalingClient.rejectCall(incomingCall.callId);
-    setIncomingCall(null);
-  }, [incomingCall]);
-
-  // ─── Profile Modal Animation ────────────────────────────────────────
-  useEffect(() => {
-    Animated.spring(modalAnim, {
-      toValue: selectedUser ? 1 : 0,
-      damping: 20,
-      stiffness: 300,
-      useNativeDriver: true,
-    }).start();
-  }, [selectedUser]);
-
-  // ─── Render User Card ───────────────────────────────────────────────
-  const renderUserCard = ({ item }) => {
-    const isOnline = onlineUsers.has(item.id);
+  // ─── Render Chat Item ──────────────────────────────────────────────────
+  const renderChatItem = ({ item }) => {
+    const isOnline = onlineUsers.has(item.other_user_id);
     return (
       <TouchableOpacity
-        style={styles.userCard}
-        onPress={() => setSelectedUser(item)}
+        style={styles.chatCard}
+        onPress={() =>
+          navigation.navigate("Chat", {
+            conversationId: item.id,
+            otherUser: {
+              id: item.other_user_id,
+              name: item.other_user_name,
+              avatar_seed: item.other_user_avatar,
+            },
+          })
+        }
         activeOpacity={0.7}
       >
         <View style={styles.avatarContainer}>
-          <Image source={{ uri: item.avatar }} style={styles.avatar} />
-          <View
-            style={[
-              styles.onlineDot,
-              { backgroundColor: isOnline ? colors.online : colors.offline },
-            ]}
+          <Image
+            source={{ uri: `${AVATAR_BASE}${item.other_user_avatar || item.other_user_name}` }}
+            style={styles.avatar}
           />
+          {isOnline && <View style={styles.onlineDot} />}
         </View>
-        <View style={styles.userInfo}>
-          <Text style={styles.userName}>{item.name}</Text>
-          <Text style={styles.userStatus}>
-            {isOnline ? "Online" : "Offline"}
+        <View style={styles.chatInfo}>
+          <Text style={styles.chatName}>{item.other_user_name}</Text>
+          <Text style={styles.chatPreview} numberOfLines={1}>
+            {item.last_message
+              ? item.last_message_sender === user?.id
+                ? `You: ${item.last_message}`
+                : item.last_message
+              : "No messages yet"}
           </Text>
         </View>
-        <TouchableOpacity
-          style={[
-            styles.quickCallBtn,
-            !isOnline && styles.quickCallBtnDisabled,
-          ]}
-          onPress={() => isOnline && handleCallUser(item)}
-          disabled={!isOnline}
-        >
-          <Text style={styles.quickCallIcon}>📞</Text>
-        </TouchableOpacity>
+        <View style={styles.chatMeta}>
+          {item.last_message_at && (
+            <Text style={styles.chatTime}>
+              {formatTime(item.last_message_at)}
+            </Text>
+          )}
+          {item.unread_count > 0 && (
+            <View style={styles.unreadBadge}>
+              <Text style={styles.unreadText}>
+                {item.unread_count > 99 ? "99+" : item.unread_count}
+              </Text>
+            </View>
+          )}
+        </View>
       </TouchableOpacity>
     );
   };
+
+  const filters = ["All", "Group", "Chats"];
 
   return (
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.greeting}>
-            Hey, {user?.name?.split(" ")[0]} 👋
-          </Text>
-          <Text style={styles.headerSubtitle}>
-            {onlineUsers.size} contacts online
-          </Text>
-        </View>
-        <TouchableOpacity onPress={logout} style={styles.logoutBtn}>
-          <Text style={styles.logoutText}>↗️</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* Search Bar */}
-      <View style={styles.searchContainer}>
-        <Text style={styles.searchIcon}>🔍</Text>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search contacts..."
-          placeholderTextColor={colors.textMuted}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          autoCorrect={false}
-        />
-        {searchQuery ? (
+        <Text style={styles.greeting}>
+          Hey, {user?.name?.split(" ")[0]} {"\u{1F44B}"}
+        </Text>
+        <View style={styles.headerIcons}>
           <TouchableOpacity
-            onPress={() => setSearchQuery("")}
-            style={styles.clearBtn}
+            onPress={() => navigation.navigate("Search")}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Text style={styles.clearText}>✕</Text>
+            <Icon name="search" size={22} color={colors.textPrimary} />
           </TouchableOpacity>
-        ) : null}
+          <TouchableOpacity
+            style={{ marginLeft: 18 }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Icon name="grid" size={22} color={colors.textPrimary} />
+          </TouchableOpacity>
+        </View>
       </View>
 
-      {/* User List */}
+      {/* Filter Tabs */}
+      <View style={styles.filterRow}>
+        {filters.map((filter) => (
+          <TouchableOpacity
+            key={filter}
+            style={[
+              styles.filterTab,
+              activeFilter === filter && styles.filterTabActive,
+            ]}
+            onPress={() => setActiveFilter(filter)}
+          >
+            <Text
+              style={[
+                styles.filterText,
+                activeFilter === filter && styles.filterTextActive,
+              ]}
+            >
+              {filter}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* Conversation List */}
       {isLoading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={colors.primary} />
         </View>
       ) : (
         <FlatList
-          data={users}
-          renderItem={renderUserCard}
+          data={conversations}
+          renderItem={renderChatItem}
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
@@ -258,134 +237,34 @@ export default function HomeScreen({ navigation }) {
           }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Text style={styles.emptyEmoji}>👥</Text>
+              <Icon
+                name="message-circle"
+                size={64}
+                color={colors.textMuted}
+              />
+              <Text style={styles.emptyTitle}>No conversations yet</Text>
               <Text style={styles.emptyText}>
-                {searchQuery ? "No users found" : "No contacts yet"}
+                Search for users and start chatting
               </Text>
+              <TouchableOpacity
+                style={styles.emptyButton}
+                onPress={() => navigation.navigate("Search")}
+              >
+                <Text style={styles.emptyButtonText}>Find People</Text>
+              </TouchableOpacity>
             </View>
           }
         />
       )}
-
-      {/* Profile Modal */}
-      <Modal
-        visible={!!selectedUser}
-        transparent
-        animationType="none"
-        onRequestClose={() => setSelectedUser(null)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setSelectedUser(null)}
-        >
-          <Animated.View
-            style={[
-              styles.profileModal,
-              {
-                transform: [
-                  {
-                    scale: modalAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.9, 1],
-                    }),
-                  },
-                ],
-                opacity: modalAnim,
-              },
-            ]}
-          >
-            {selectedUser && (
-              <>
-                <Image
-                  source={{ uri: selectedUser.avatar }}
-                  style={styles.profileAvatar}
-                />
-                <Text style={styles.profileName}>{selectedUser.name}</Text>
-                <Text style={styles.profileEmail}>{selectedUser.email}</Text>
-                <View
-                  style={[
-                    styles.profileStatus,
-                    {
-                      backgroundColor: onlineUsers.has(selectedUser.id)
-                        ? "rgba(16, 185, 129, 0.1)"
-                        : "rgba(102, 102, 128, 0.1)",
-                    },
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.profileDot,
-                      {
-                        backgroundColor: onlineUsers.has(selectedUser.id)
-                          ? colors.online
-                          : colors.offline,
-                      },
-                    ]}
-                  />
-                  <Text
-                    style={[
-                      styles.profileStatusText,
-                      {
-                        color: onlineUsers.has(selectedUser.id)
-                          ? colors.online
-                          : colors.textMuted,
-                      },
-                    ]}
-                  >
-                    {onlineUsers.has(selectedUser.id) ? "Online" : "Offline"}
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  style={[
-                    styles.callButton,
-                    !onlineUsers.has(selectedUser.id) &&
-                      styles.callButtonDisabled,
-                  ]}
-                  onPress={() => handleCallUser(selectedUser)}
-                  disabled={!onlineUsers.has(selectedUser.id)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.callButtonText}>📞 Call Now</Text>
-                </TouchableOpacity>
-              </>
-            )}
-          </Animated.View>
-        </TouchableOpacity>
-      </Modal>
-
-      {/* Incoming Call Modal */}
-      <Modal visible={!!incomingCall} transparent animationType="slide">
-        <View style={styles.incomingCallOverlay}>
-          <View style={styles.incomingCallCard}>
-            <Text style={styles.incomingCallEmoji}>📞</Text>
-            <Text style={styles.incomingCallTitle}>Incoming Call</Text>
-            <Text style={styles.incomingCallerName}>
-              {incomingCall?.callerName}
-            </Text>
-            <View style={styles.incomingCallActions}>
-              <TouchableOpacity
-                style={styles.rejectButton}
-                onPress={handleRejectCall}
-              >
-                <Text style={styles.rejectText}>✕</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.acceptButton}
-                onPress={handleAcceptCall}
-              >
-                <Text style={styles.acceptText}>✓</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: colors.bg },
+  container: {
+    flex: 1,
+    backgroundColor: colors.bg,
+  },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -394,47 +273,69 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingBottom: spacing.md,
   },
-  greeting: { ...typography.h2, fontSize: 28 },
-  headerSubtitle: { ...typography.bodySmall, marginTop: 2 },
-  logoutBtn: { padding: spacing.sm },
-  logoutText: { fontSize: 24 },
-
-  searchContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: colors.bgCard,
-    borderRadius: radius.lg,
-    marginHorizontal: spacing.lg,
-    marginBottom: spacing.md,
-    paddingHorizontal: spacing.md,
-    borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.08)",
-  },
-  searchIcon: { fontSize: 16, marginRight: spacing.sm },
-  searchInput: {
-    flex: 1,
-    paddingVertical: 14,
-    fontSize: 16,
+  greeting: {
+    fontSize: 28,
+    fontWeight: "800",
     color: colors.textPrimary,
+    letterSpacing: -0.3,
   },
-  clearBtn: { padding: spacing.sm },
-  clearText: { color: colors.textMuted, fontSize: 16, fontWeight: "600" },
-
-  listContent: { paddingHorizontal: spacing.lg, paddingBottom: 100 },
-  loadingContainer: { flex: 1, justifyContent: "center", alignItems: "center" },
-
-  userCard: {
+  headerIcons: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: colors.bgCard,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.05)",
   },
-  avatarContainer: { position: "relative", marginRight: spacing.md },
-  avatar: { width: 52, height: 52, borderRadius: 26 },
+
+  // Filter Tabs
+  filterRow: {
+    flexDirection: "row",
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.md,
+    gap: 8,
+  },
+  filterTab: {
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: colors.bgCard,
+  },
+  filterTabActive: {
+    backgroundColor: colors.primary,
+  },
+  filterText: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: colors.textMuted,
+  },
+  filterTextActive: {
+    color: "#fff",
+  },
+
+  // Chat List
+  listContent: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: 100,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  chatCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(255,255,255,0.04)",
+  },
+  avatarContainer: {
+    position: "relative",
+    marginRight: spacing.md,
+  },
+  avatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: colors.bgElevated,
+  },
   onlineDot: {
     position: "absolute",
     bottom: 2,
@@ -442,110 +343,71 @@ const styles = StyleSheet.create({
     width: 14,
     height: 14,
     borderRadius: 7,
+    backgroundColor: colors.online,
     borderWidth: 2,
-    borderColor: colors.bgCard,
+    borderColor: colors.bg,
   },
-  userInfo: { flex: 1 },
-  userName: { ...typography.body, fontWeight: "600" },
-  userStatus: { ...typography.caption, marginTop: 2 },
-  quickCallBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(99, 102, 241, 0.1)",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  quickCallBtnDisabled: { opacity: 0.3 },
-  quickCallIcon: { fontSize: 20 },
-
-  emptyContainer: { alignItems: "center", paddingTop: 80 },
-  emptyEmoji: { fontSize: 64, marginBottom: spacing.md },
-  emptyText: { ...typography.bodySmall },
-
-  // Profile Modal
-  modalOverlay: {
+  chatInfo: {
     flex: 1,
+    marginRight: spacing.sm,
+  },
+  chatName: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: colors.textPrimary,
+    marginBottom: 3,
+  },
+  chatPreview: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    lineHeight: 20,
+  },
+  chatMeta: {
+    alignItems: "flex-end",
+    gap: 6,
+  },
+  chatTime: {
+    fontSize: 12,
+    color: colors.textMuted,
+    fontWeight: "500",
+  },
+  unreadBadge: {
+    backgroundColor: colors.primary,
+    borderRadius: 12,
+    minWidth: 22,
+    height: 22,
+    paddingHorizontal: 6,
+    alignItems: "center",
     justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: colors.overlay,
   },
-  profileModal: {
-    width: "85%",
-    maxWidth: 340,
-    backgroundColor: colors.bgCard,
-    borderRadius: radius.xl,
-    padding: spacing.xl,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.bgGlassBorder,
-    ...shadows.xl,
+  unreadText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#fff",
   },
-  profileAvatar: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    marginBottom: spacing.md,
-  },
-  profileName: { ...typography.h3, marginBottom: 4 },
-  profileEmail: { ...typography.bodySmall, marginBottom: spacing.md },
-  profileStatus: {
-    flexDirection: "row",
+
+  // Empty State
+  emptyContainer: {
     alignItems: "center",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: radius.full,
+    paddingTop: 80,
+  },
+  emptyTitle: {
+    ...typography.h3,
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  emptyText: {
+    ...typography.bodySmall,
     marginBottom: spacing.lg,
   },
-  profileDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
-  profileStatusText: { ...typography.caption },
-  callButton: {
+  emptyButton: {
     backgroundColor: colors.primary,
     borderRadius: radius.md,
     paddingVertical: 14,
     paddingHorizontal: 32,
-    width: "100%",
-    alignItems: "center",
     ...shadows.xl,
   },
-  callButtonDisabled: { backgroundColor: colors.bgElevated, ...shadows.sm },
-  callButtonText: { ...typography.button },
-
-  // Incoming Call
-  incomingCallOverlay: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.85)",
+  emptyButtonText: {
+    ...typography.button,
   },
-  incomingCallCard: {
-    width: "80%",
-    backgroundColor: colors.bgCard,
-    borderRadius: radius.xl,
-    padding: spacing.xl,
-    alignItems: "center",
-    ...shadows.xl,
-  },
-  incomingCallEmoji: { fontSize: 48, marginBottom: spacing.md },
-  incomingCallTitle: { ...typography.label, marginBottom: spacing.sm },
-  incomingCallerName: { ...typography.h2, marginBottom: spacing.xl },
-  incomingCallActions: { flexDirection: "row", gap: 40 },
-  rejectButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.error,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  rejectText: { fontSize: 28, color: "#fff", fontWeight: "700" },
-  acceptButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.success,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  acceptText: { fontSize: 28, color: "#fff", fontWeight: "700" },
 });

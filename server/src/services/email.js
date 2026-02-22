@@ -31,17 +31,65 @@ function generateCode() {
  * @param {string} code - 6-digit verification code
  */
 async function sendVerificationEmail(email, name, code) {
-  const subject = "Verify your VideoCall account";
+  const subject = "Verify your Aux account";
   const html = `
-    <div style="font-family: 'Inter', -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 24px; background: #0f0f1a; color: #e2e2f0; border-radius: 16px;">
-      <h1 style="font-size: 24px; font-weight: 700; color: #ffffff; margin: 0 0 8px;">Welcome, ${name}! 👋</h1>
-      <p style="font-size: 14px; color: #9999b3; margin: 0 0 32px;">Verify your email to start making crystal-clear calls.</p>
-      <div style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); border-radius: 12px; padding: 24px; text-align: center; margin-bottom: 24px;">
-        <p style="font-size: 12px; text-transform: uppercase; letter-spacing: 2px; color: rgba(255,255,255,0.7); margin: 0 0 8px;">Your verification code</p>
-        <p style="font-size: 36px; font-weight: 800; letter-spacing: 8px; color: #ffffff; margin: 0;">${code}</p>
-      </div>
-      <p style="font-size: 13px; color: #666680; margin: 0;">This code expires in 10 minutes. If you didn't create an account, ignore this email.</p>
-    </div>
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    </head>
+    <body style="margin: 0; padding: 0; background-color: #f5f5f5; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f5f5f5; padding: 40px 16px;">
+        <tr>
+          <td align="center">
+            <table width="480" cellpadding="0" cellspacing="0" style="max-width: 480px; width: 100%; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(0,0,0,0.06);">
+
+              <!-- Header -->
+              <tr>
+                <td style="padding: 36px 32px 24px; text-align: center;">
+                  <h1 style="font-size: 22px; font-weight: 800; color: #1A1A2E; margin: 0 0 8px; letter-spacing: -0.5px;">Hey ${name}!</h1>
+                  <p style="font-size: 15px; color: #8E8E93; margin: 0; line-height: 22px;">Verify your email to get started with <strong style="color: #1A1A2E;">Aux</strong></p>
+                </td>
+              </tr>
+
+              <!-- Code Box -->
+              <tr>
+                <td style="padding: 0 32px 28px;">
+                  <div style="background-color: #FAFAFA; border: 1.5px solid #E5E5EA; border-radius: 14px; padding: 24px; text-align: center;">
+                    <p style="font-size: 11px; text-transform: uppercase; letter-spacing: 2.5px; color: #8E8E93; margin: 0 0 12px; font-weight: 600;">Verification Code</p>
+                    <p style="font-size: 38px; font-weight: 800; letter-spacing: 10px; color: #1A1A2E; margin: 0; font-family: 'SF Mono', 'Fira Code', 'Courier New', monospace;">${code}</p>
+                  </div>
+                </td>
+              </tr>
+
+              <!-- Expiry Notice -->
+              <tr>
+                <td style="padding: 0 32px 12px; text-align: center;">
+                  <p style="font-size: 13px; color: #8E8E93; margin: 0; line-height: 20px;">This code expires in <strong style="color: #1A1A2E;">10 minutes</strong></p>
+                </td>
+              </tr>
+
+              <!-- Divider -->
+              <tr>
+                <td style="padding: 0 32px;">
+                  <div style="height: 1px; background-color: #F0F0F0;"></div>
+                </td>
+              </tr>
+
+              <!-- Footer -->
+              <tr>
+                <td style="padding: 20px 32px 28px; text-align: center;">
+                  <p style="font-size: 12px; color: #AEAEB2; margin: 0; line-height: 18px;">If you didn't create an account on Aux, you can safely ignore this email.</p>
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
+    </html>
   `;
 
   if (resend) {

@@ -32,7 +32,7 @@ const config = {
 
   resend: {
     apiKey: process.env.RESEND_API_KEY,
-    from: process.env.RESEND_FROM || "VideoCall <onboarding@resend.dev>",
+    from: process.env.RESEND_FROM || "Aux <onboarding@resend.dev>",
   },
 
   turn: {

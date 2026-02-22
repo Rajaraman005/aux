@@ -42,6 +42,12 @@ export const colors = {
   offline: "#666680",
   busy: "#f59e0b",
 
+  // Chat
+  chatBubbleMine: "#6366f1",
+  chatBubbleTheirs: "#1a1a3e",
+  tabBarBg: "#12122a",
+  inputBarBg: "#12122a",
+
   // Overlay
   overlay: "rgba(0, 0, 0, 0.6)",
   overlayLight: "rgba(0, 0, 0, 0.3)",

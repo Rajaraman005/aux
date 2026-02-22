@@ -1,7 +1,15 @@
 /**
- * WebSocket Signaling Client.
- * Connects to the signaling server with JWT auth.
- * Features: auto-reconnect, heartbeat, event-driven messaging.
+ * WebSocket Signaling Client — FAANG-Grade.
+ *
+ * ★ Smart Reconnect:
+ *   - Auto-reconnect with exponential backoff
+ *   - Rejoin active call session after reconnect
+ *   - Re-send queued ICE candidates
+ *   - Heartbeat to detect dead connections early
+ *
+ * ★ Message Queue:
+ *   - Messages sent while disconnected are queued
+ *   - Automatically flushed on reconnection
  */
 import { WS_BASE } from "../config/api";
 
@@ -12,10 +20,17 @@ class SignalingClient {
     this.listeners = new Map();
     this.isConnected = false;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 10;
+    this.maxReconnectAttempts = 15;
     this.reconnectTimer = null;
     this.heartbeatTimer = null;
     this.onConnectionChange = null;
+
+    // ★ Smart Reconnect
+    this._activeCallId = null;
+    this._messageQueue = [];
+    this._maxQueueSize = 50;
+    this._lastPongTime = 0;
+    this._pongCheckTimer = null;
   }
 
   /**
@@ -39,11 +54,30 @@ class SignalingClient {
         this.startHeartbeat();
         this.emit("connected");
         this.onConnectionChange?.(true);
+
+        // ★ Flush queued messages
+        this._flushQueue();
+
+        // ★ Rejoin active call session
+        if (this._activeCallId) {
+          console.log(`🔄 Rejoining call session: ${this._activeCallId}`);
+          this.send({
+            type: "call-rejoin",
+            callId: this._activeCallId,
+          });
+        }
       };
 
       this.ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data);
+
+          // Track pong for liveness detection
+          if (message.type === "pong" || message.type === "heartbeat-ack") {
+            this._lastPongTime = Date.now();
+            return;
+          }
+
           this.emit(message.type, message);
         } catch (err) {
           console.error("Signaling parse error:", err);
@@ -75,15 +109,44 @@ class SignalingClient {
   }
 
   /**
-   * Send a message to the signaling server.
+   * Send a message. ★ Queue if disconnected.
    */
   send(message) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
       return true;
     }
-    console.warn("Cannot send — WebSocket not connected");
+
+    // ★ Queue for later delivery (except heartbeats)
+    if (
+      message.type !== "heartbeat" &&
+      this._messageQueue.length < this._maxQueueSize
+    ) {
+      this._messageQueue.push({ ...message, _queuedAt: Date.now() });
+      console.log(`📨 Queued message: ${message.type}`);
+    }
     return false;
+  }
+
+  /**
+   * ★ Flush queued messages after reconnect.
+   */
+  _flushQueue() {
+    if (this._messageQueue.length === 0) return;
+
+    const now = Date.now();
+    // Drop messages older than 30s (stale ICE candidates, etc.)
+    const fresh = this._messageQueue.filter((m) => now - m._queuedAt < 30000);
+
+    console.log(
+      `📤 Flushing ${fresh.length} queued messages (${this._messageQueue.length - fresh.length} dropped as stale)`,
+    );
+
+    for (const msg of fresh) {
+      delete msg._queuedAt;
+      this.send(msg);
+    }
+    this._messageQueue = [];
   }
 
   /**
@@ -99,6 +162,8 @@ class SignalingClient {
       this.ws = null;
     }
     this.isConnected = false;
+    this._activeCallId = null;
+    this._messageQueue = [];
   }
 
   // ─── Auto-Reconnect with Exponential Backoff ─────────────────────────────
@@ -109,7 +174,8 @@ class SignalingClient {
       return;
     }
 
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+    // ★ Faster initial reconnects (1s, 2s, 4s...) capped at 15s
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 15000);
     this.reconnectAttempts++;
 
     console.log(
@@ -125,17 +191,31 @@ class SignalingClient {
     this.emit("reconnecting", { attempt: this.reconnectAttempts, delay });
   }
 
-  // ─── Heartbeat ────────────────────────────────────────────────────────────
+  // ─── Heartbeat with Dead Connection Detection ────────────────────────────
   startHeartbeat() {
+    this._lastPongTime = Date.now();
+
     this.heartbeatTimer = setInterval(() => {
       this.send({ type: "heartbeat" });
-    }, 25000);
+    }, 15000);
+
+    // ★ Check for dead connection (no pong in 45s)
+    this._pongCheckTimer = setInterval(() => {
+      if (Date.now() - this._lastPongTime > 45000 && this.isConnected) {
+        console.warn("💀 Dead connection detected — forcing reconnect");
+        this.ws?.close(4003, "Dead connection");
+      }
+    }, 20000);
   }
 
   stopHeartbeat() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this._pongCheckTimer) {
+      clearInterval(this._pongCheckTimer);
+      this._pongCheckTimer = null;
     }
   }
 
@@ -172,6 +252,7 @@ class SignalingClient {
   }
 
   acceptCall(callId) {
+    this._activeCallId = callId; // ★ Track active call
     return this.send({ type: "call-accept", callId });
   }
 
@@ -180,10 +261,12 @@ class SignalingClient {
   }
 
   sendOffer(callId, sdp) {
+    this._activeCallId = callId; // ★ Track active call
     return this.send({ type: "offer", callId, sdp });
   }
 
   sendAnswer(callId, sdp) {
+    this._activeCallId = callId; // ★ Track active call
     return this.send({ type: "answer", callId, sdp });
   }
 
@@ -192,7 +275,9 @@ class SignalingClient {
   }
 
   hangUp(callId) {
-    return this.send({ type: "hang-up", callId });
+    const result = this.send({ type: "hang-up", callId });
+    this._activeCallId = null; // ★ Clear active call
+    return result;
   }
 
   sendIceRestart(callId, sdp) {
@@ -201,6 +286,19 @@ class SignalingClient {
 
   sendCallMetrics(callId, stats) {
     return this.send({ type: "call-metrics", callId, stats });
+  }
+
+  // ─── Chat Helpers ───────────────────────────────────────────────────────────
+  sendChatMessage(conversationId, content, tempId) {
+    return this.send({ type: "chat-message", conversationId, content, tempId });
+  }
+
+  sendTyping(conversationId) {
+    return this.send({ type: "typing", conversationId });
+  }
+
+  sendMessageRead(conversationId) {
+    return this.send({ type: "message-read", conversationId });
   }
 }
 

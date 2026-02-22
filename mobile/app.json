@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "VideoCall",
+    "name": "Aux",
     "slug": "videocall",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -14,10 +14,10 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.videocall.app",
+      "bundleIdentifier": "com.aux.app",
       "infoPlist": {
-        "NSCameraUsageDescription": "VideoCall needs camera access for video calls",
-        "NSMicrophoneUsageDescription": "VideoCall needs microphone access for audio calls",
+        "NSCameraUsageDescription": "Aux needs camera access for video calls",
+        "NSMicrophoneUsageDescription": "Aux needs microphone access for audio calls",
         "UIBackgroundModes": [
           "voip",
           "audio"
@@ -29,7 +29,7 @@
       "adaptiveIcon": {
         "backgroundColor": "#0a0a1a"
       },
-      "package": "com.videocall.app",
+      "package": "com.aux.app",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",

@@ -58,6 +58,7 @@ if (config.isDev) {
 // ─── API Routes ──────────────────────────────────────────────────────────────
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/conversations", require("./routes/chat"));
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
@@ -139,7 +140,7 @@ async function start() {
 
   server.listen(config.port, () => {
     console.log(`\n${"═".repeat(50)}`);
-    console.log(`🚀 VideoCall Server v1.0.0`);
+    console.log(`🚀 Aux Server v1.0.0`);
     console.log(`   Environment: ${config.env}`);
     console.log(`   HTTP:        http://localhost:${config.port}`);
     console.log(`   WebSocket:   ws://localhost:${config.port}/ws`);

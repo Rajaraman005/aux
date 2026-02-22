@@ -5,7 +5,7 @@
 
 // ─── Your computer's LAN IP (from Expo output) ─────────────
 // Change this if your network IP changes
-const DEV_SERVER_IP = "192.168.1.3";
+const DEV_SERVER_IP = "192.168.1.5";
 
 const API_BASE = __DEV__
   ? `http://${DEV_SERVER_IP}:3000`
@@ -29,6 +29,13 @@ const endpoints = {
     search: `${API_BASE}/api/users/search`,
     me: `${API_BASE}/api/users/me`,
     profile: (id) => `${API_BASE}/api/users/${id}`,
+  },
+  conversations: {
+    list: `${API_BASE}/api/conversations`,
+    create: `${API_BASE}/api/conversations`,
+    messages: (id) => `${API_BASE}/api/conversations/${id}/messages`,
+    send: (id) => `${API_BASE}/api/conversations/${id}/messages`,
+    read: (id) => `${API_BASE}/api/conversations/${id}/read`,
   },
   turn: `${API_BASE}/api/turn-credentials`,
   metrics: `${API_BASE}/api/metrics/call`,

@@ -1,18 +1,17 @@
 /**
- * Audio-First WebRTC Engine.
- * THE MOST CRITICAL FILE IN THE ENTIRE APP.
+ * Audio-First WebRTC Engine — FAANG-Grade.
  *
- * Design Principles:
- * 1. Audio ALWAYS gets priority over video
- * 2. Opus codec forced at 8-24kbps with FEC+DTX
- * 3. Video degrades first, audio never degrades until video is fully dropped
+ * Design:
+ * 1. Formal Call State Machine (IDLE→CONNECTED→RECONNECTING→ENDED)
+ * 2. Audio ALWAYS gets priority over video
+ * 3. Opus codec forced at 8-24kbps with FEC+DTX
  * 4. ICE restart for seamless WiFi↔LTE handoff
- * 5. SDP munging for Opus optimization
- *
- * Call Cascade: P2P → SFU → TURN relay
+ * 5. Background mode — camera pauses, audio continues
+ * 6. Battery optimization — stats polling pauses when not needed
+ * 7. InCallManager for proper audio routing
  */
 
-// ─── Conditional WebRTC Import (graceful fallback for Expo Go) ──────────
+// ─── Conditional WebRTC Import ───────────────────────────────────────────────
 let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, mediaDevices;
 let WEBRTC_AVAILABLE = false;
 
@@ -25,13 +24,34 @@ try {
   WEBRTC_AVAILABLE = true;
 } catch (err) {
   console.warn(
-    "⚠️  react-native-webrtc not available (Expo Go mode). Call features disabled.",
+    "⚠️  react-native-webrtc not available. Call features disabled.",
   );
 }
 
+// ─── InCallManager for audio routing ─────────────────────────────────────────
+let InCallManager = null;
+try {
+  InCallManager = require("react-native-incall-manager").default;
+} catch (err) {
+  console.warn("⚠️  InCallManager not available.");
+}
+
+import { AppState } from "react-native";
 import signalingClient from "./socket";
 import { endpoints } from "../config/api";
 import apiClient from "./api";
+
+// ─── Call State Machine ──────────────────────────────────────────────────────
+export const CALL_STATES = {
+  IDLE: "idle",
+  CALLING: "calling",
+  RINGING: "ringing",
+  CONNECTING: "connecting",
+  CONNECTED: "connected",
+  RECONNECTING: "reconnecting",
+  ENDED: "ended",
+  FAILED: "failed",
+};
 
 // ─── ICE Server Config ──────────────────────────────────────────────────────
 const DEFAULT_ICE_SERVERS = [
@@ -41,13 +61,12 @@ const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun3.l.google.com:19302" },
 ];
 
-// ─── RTC Configuration ──────────────────────────────────────────────────────
 const RTC_CONFIG = {
   iceServers: DEFAULT_ICE_SERVERS,
-  iceTransportPolicy: "all", // Try P2P first, then relay
-  bundlePolicy: "max-bundle", // Bundle audio+video on single transport
-  rtcpMuxPolicy: "require", // Reduce port usage
-  iceCandidatePoolSize: 5, // Pre-gather ICE candidates for faster connection
+  iceTransportPolicy: "all",
+  bundlePolicy: "max-bundle",
+  rtcpMuxPolicy: "require",
+  iceCandidatePoolSize: 5,
 };
 
 // ─── Media Constraints ───────────────────────────────────────────────────────
@@ -56,7 +75,7 @@ const AUDIO_CONSTRAINTS = {
   autoGainControl: true,
   noiseSuppression: true,
   sampleRate: 48000,
-  channelCount: 1, // Mono — saves bandwidth
+  channelCount: 1,
 };
 
 const VIDEO_CONSTRAINTS = {
@@ -77,6 +96,15 @@ class WebRTCEngine {
     this.iceCandidateQueue = [];
     this.iceServers = DEFAULT_ICE_SERVERS;
 
+    // ★ Queued signaling (for race condition: offer arrives before PC is ready)
+    this._pendingOffer = null;
+    this._pendingAnswer = null;
+    this._initialized = false;
+
+    // ★ Call State Machine
+    this._callState = CALL_STATES.IDLE;
+    this.onCallStateChange = null;
+
     // Event callbacks
     this.onRemoteStream = null;
     this.onLocalStream = null;
@@ -87,63 +115,83 @@ class WebRTCEngine {
 
     // Stats polling
     this.statsInterval = null;
+    this._statsActive = true;
+
+    // Background handling
+    this._appStateSubscription = null;
+    this._isBackgrounded = false;
+    this._videoWasEnabled = true;
+
+    // ICE restart tracking
+    this._iceRestartAttempts = 0;
+    this._maxIceRestarts = 3;
+    this._iceRestartTimer = null;
   }
 
-  /** Check if WebRTC native module is loaded */
+  // ─── State Machine ─────────────────────────────────────────────────────────
+  get callState() {
+    return this._callState;
+  }
+
+  _setState(newState) {
+    const prev = this._callState;
+    if (prev === newState) return;
+    this._callState = newState;
+    console.log(`📱 Call state: ${prev} → ${newState}`);
+    this.onCallStateChange?.(newState, prev);
+  }
+
   get isAvailable() {
     return WEBRTC_AVAILABLE;
   }
 
-  /**
-   * Fetch TURN credentials from server (time-limited HMAC).
-   */
+  // ─── Fetch TURN Credentials ────────────────────────────────────────────────
   async fetchIceServers() {
     try {
       const data = await apiClient.get(endpoints.turn);
       this.iceServers = data.iceServers;
       return data.iceServers;
     } catch (err) {
-      console.warn(
-        "Failed to fetch TURN credentials, using STUN only:",
-        err.message,
-      );
+      console.warn("Failed to fetch TURN, using STUN only:", err.message);
       return DEFAULT_ICE_SERVERS;
     }
   }
 
-  /**
-   * Initialize a call — get media, create peer connection.
-   * @param {string} callId
-   * @param {boolean} isCaller
-   * @param {boolean} videoEnabled
-   */
+  // ─── Initialize Call ───────────────────────────────────────────────────────
   async initialize(callId, isCaller, videoEnabled = true) {
     this.callId = callId;
     this.isCaller = isCaller;
     this.isAudioOnly = !videoEnabled;
+    this._iceRestartAttempts = 0;
 
-    // Fetch fresh TURN credentials
+    this._setState(isCaller ? CALL_STATES.CALLING : CALL_STATES.CONNECTING);
+
+    // ★ Start InCallManager for proper audio routing
+    if (InCallManager) {
+      try {
+        InCallManager.start({ media: videoEnabled ? "video" : "audio" });
+        InCallManager.setForceSpeakerphoneOn(videoEnabled);
+        InCallManager.setKeepScreenOn(true);
+      } catch (err) {
+        console.warn("InCallManager start failed:", err.message);
+      }
+    }
+
+    // Fetch TURN credentials
     const iceServers = await this.fetchIceServers();
 
     // Create RTCPeerConnection
-    this.pc = new RTCPeerConnection({
-      ...RTC_CONFIG,
-      iceServers,
-    });
+    this.pc = new RTCPeerConnection({ ...RTC_CONFIG, iceServers });
 
     // ─── Get Local Media (Audio FIRST, then video) ────────────────────
     try {
-      // Always get audio first
       this.localStream = await mediaDevices.getUserMedia({
         audio: AUDIO_CONSTRAINTS,
         video: videoEnabled ? VIDEO_CONSTRAINTS : false,
       });
 
-      // Add tracks to peer connection
       this.localStream.getTracks().forEach((track) => {
         const sender = this.pc.addTrack(track, this.localStream);
-
-        // ★ CRITICAL: Set audio to HIGH priority, video to LOW
         if (track.kind === "audio") {
           this.setTrackPriority(sender, "high");
         } else {
@@ -153,12 +201,8 @@ class WebRTCEngine {
 
       this.onLocalStream?.(this.localStream);
     } catch (err) {
-      // If video fails, fall back to audio-only
       if (videoEnabled) {
-        console.warn(
-          "Video capture failed, falling back to audio-only:",
-          err.message,
-        );
+        console.warn("Video failed, falling back to audio:", err.message);
         this.localStream = await mediaDevices.getUserMedia({
           audio: AUDIO_CONSTRAINTS,
           video: false,
@@ -185,68 +229,138 @@ class WebRTCEngine {
     // ─── ICE Candidate Handling ───────────────────────────────────────
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log(`🧊 Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`);
         signalingClient.sendIceCandidate(this.callId, event.candidate);
+      } else {
+        console.log("🧊 ICE gathering complete");
       }
     };
 
-    // ─── Connection State Monitoring ──────────────────────────────────
+    // ─── Connection State Monitoring (★ NULL-SAFE) ────────────────────
     this.pc.onconnectionstatechange = () => {
+      if (!this.pc) return; // ★ Guard against null after cleanup
       const state = this.pc.connectionState;
       console.log(`📡 Connection state: ${state}`);
       this.onConnectionStateChange?.(state);
 
-      if (state === "failed") {
-        this.attemptIceRestart();
+      switch (state) {
+        case "connected":
+          this._setState(CALL_STATES.CONNECTED);
+          this._iceRestartAttempts = 0;
+          break;
+        case "disconnected":
+          this._setState(CALL_STATES.RECONNECTING);
+          this.scheduleIceRestart(2000);
+          break;
+        case "failed":
+          this.attemptIceRestart();
+          break;
+        case "closed":
+          this._setState(CALL_STATES.ENDED);
+          break;
       }
     };
 
     this.pc.oniceconnectionstatechange = () => {
+      if (!this.pc) return; // ★ Guard against null after cleanup
       const state = this.pc.iceConnectionState;
       console.log(`🧊 ICE state: ${state}`);
       this.onIceConnectionStateChange?.(state);
 
       if (state === "disconnected") {
-        // Wait 3s before attempting ICE restart (may recover)
-        setTimeout(() => {
-          if (this.pc?.iceConnectionState === "disconnected") {
-            this.attemptIceRestart();
-          }
-        }, 3000);
+        this.scheduleIceRestart(3000);
       }
     };
 
     // ─── Start Stats Polling ──────────────────────────────────────────
     this.startStatsPolling();
 
+    // ─── Background Mode Handling ─────────────────────────────────────
+    this._setupAppStateHandler();
+
     // ─── Process queued ICE candidates ────────────────────────────────
     while (this.iceCandidateQueue.length > 0) {
       const candidate = this.iceCandidateQueue.shift();
       await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
     }
+
+    this._initialized = true;
+
+    // ★ Process queued offer/answer (race condition fix)
+    // If the offer arrived while we were still initializing, process it now
+    if (!isCaller && this._pendingOffer) {
+      console.log("📩 Processing queued offer (arrived before PC was ready)");
+      const offer = this._pendingOffer;
+      this._pendingOffer = null;
+      await this.handleOffer(offer);
+    }
+    if (isCaller && this._pendingAnswer) {
+      console.log("📩 Processing queued answer (arrived before PC was ready)");
+      const answer = this._pendingAnswer;
+      this._pendingAnswer = null;
+      await this.handleAnswer(answer);
+    }
   }
 
-  /**
-   * Set transceiver priority for bandwidth allocation.
-   * Audio = high, Video = low → audio never degrades before video.
-   */
+  // ─── Background Mode (App State) ───────────────────────────────────────────
+  _setupAppStateHandler() {
+    this._appStateSubscription = AppState.addEventListener(
+      "change",
+      (nextState) => {
+        if (nextState === "background" || nextState === "inactive") {
+          this._handleBackground();
+        } else if (nextState === "active") {
+          this._handleForeground();
+        }
+      },
+    );
+  }
+
+  _handleBackground() {
+    if (this._isBackgrounded) return;
+    this._isBackgrounded = true;
+    console.log("📱 App backgrounded — pausing video, keeping audio");
+
+    // Pause video track to save battery
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack) {
+      this._videoWasEnabled = videoTrack.enabled;
+      videoTrack.enabled = false;
+    }
+
+    // ★ Stop stats polling to save battery
+    this.pauseStatsPolling();
+  }
+
+  _handleForeground() {
+    if (!this._isBackgrounded) return;
+    this._isBackgrounded = false;
+    console.log("📱 App foregrounded — restoring video");
+
+    // Restore video track
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack && this._videoWasEnabled) {
+      videoTrack.enabled = true;
+    }
+
+    // Resume stats polling
+    this.resumeStatsPolling();
+  }
+
+  // ─── Track Priority ────────────────────────────────────────────────────────
   setTrackPriority(sender, priority) {
     try {
       const params = sender.getParameters();
       if (params.encodings && params.encodings.length > 0) {
         params.encodings[0].networkPriority = priority;
         params.encodings[0].priority = priority;
-
-        // For audio: set optimal Opus bitrate
         if (sender.track?.kind === "audio") {
-          params.encodings[0].maxBitrate = 24000; // 24kbps max
+          params.encodings[0].maxBitrate = 24000;
         }
-
-        // For video: cap bitrate
         if (sender.track?.kind === "video") {
-          params.encodings[0].maxBitrate = 500000; // 500kbps max
+          params.encodings[0].maxBitrate = 500000;
           params.encodings[0].maxFramerate = 24;
         }
-
         sender.setParameters(params);
       }
     } catch (err) {
@@ -254,69 +368,75 @@ class WebRTCEngine {
     }
   }
 
-  /**
-   * Create and send an SDP offer.
-   * Munges SDP to optimize Opus codec parameters.
-   */
+  // ─── SDP Offer/Answer ──────────────────────────────────────────────────────
   async createOffer() {
+    this._setState(CALL_STATES.CONNECTING);
     const offer = await this.pc.createOffer({
       offerToReceiveAudio: true,
-      offerToReceiveVideo: !this.isAudioOnly,
+      offerToReceiveVideo: true, // ★ Always receive video — let network monitor decide display
     });
-
-    // ★ Munge SDP for Opus optimization
     offer.sdp = this.mungeOpusSDP(offer.sdp);
-
     await this.pc.setLocalDescription(offer);
     signalingClient.sendOffer(this.callId, offer);
   }
 
-  /**
-   * Handle incoming SDP offer.
-   */
   async handleOffer(sdp) {
+    // ★ Queue if PC isn't ready yet (race condition fix)
+    if (!this.pc || !this._initialized) {
+      console.log("⏳ Offer received before PC ready — queuing");
+      this._pendingOffer = sdp;
+      return;
+    }
     const desc = new RTCSessionDescription(sdp);
     await this.pc.setRemoteDescription(desc);
-
+    // ★ Drain queued ICE candidates now that remoteDescription is set
+    await this._drainIceCandidateQueue();
     const answer = await this.pc.createAnswer();
     answer.sdp = this.mungeOpusSDP(answer.sdp);
-
     await this.pc.setLocalDescription(answer);
     signalingClient.sendAnswer(this.callId, answer);
   }
 
-  /**
-   * Handle incoming SDP answer.
-   */
   async handleAnswer(sdp) {
+    // ★ Queue if PC isn't ready yet
+    if (!this.pc || !this._initialized) {
+      console.log("⏳ Answer received before PC ready — queuing");
+      this._pendingAnswer = sdp;
+      return;
+    }
     const desc = new RTCSessionDescription(sdp);
     await this.pc.setRemoteDescription(desc);
+    // ★ Drain queued ICE candidates now that remoteDescription is set
+    await this._drainIceCandidateQueue();
   }
 
-  /**
-   * Handle incoming ICE candidate.
-   */
   async handleIceCandidate(candidate) {
     if (!this.pc || !this.pc.remoteDescription) {
-      // Queue if remote description not set yet
       this.iceCandidateQueue.push(candidate);
       return;
     }
-    await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    try {
+      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (err) {
+      console.warn("Failed to add ICE candidate:", err.message);
+    }
   }
 
-  /**
-   * ★ SDP Munging — Optimize Opus Codec for Low-Bandwidth Audio
-   *
-   * Forces the following Opus parameters:
-   * - maxaveragebitrate: 24000 (24kbps — clear voice on low networks)
-   * - useinbandfec: 1 (Forward Error Correction — survives packet loss)
-   * - usedtx: 1 (Discontinuous Transmission — saves bandwidth in silence)
-   * - stereo: 0 (Mono — 50% bandwidth reduction)
-   * - cbr: 0 (Variable Bitrate — adapts to network)
-   * - minptime: 10 (Minimum packet time)
-   * - maxptime: 60 (Maximum packet time — larger packets = fewer headers)
-   */
+  // ★ Drain all queued ICE candidates after remoteDescription is set
+  async _drainIceCandidateQueue() {
+    if (this.iceCandidateQueue.length === 0) return;
+    console.log(`🧊 Draining ${this.iceCandidateQueue.length} queued ICE candidates`);
+    while (this.iceCandidateQueue.length > 0) {
+      const candidate = this.iceCandidateQueue.shift();
+      try {
+        await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.warn("Failed to add queued ICE candidate:", err.message);
+      }
+    }
+  }
+
+  // ─── SDP Munging — Opus Optimization ───────────────────────────────────────
   mungeOpusSDP(sdp) {
     const opusParams = [
       "maxaveragebitrate=24000",
@@ -328,35 +448,25 @@ class WebRTCEngine {
       "maxptime=60",
     ].join(";");
 
-    // Find Opus fmtp line and append parameters
     const lines = sdp.split("\r\n");
     const munged = lines.map((line) => {
-      // Find Opus payload type
       if (
         line.startsWith("a=rtpmap:") &&
         line.toLowerCase().includes("opus/48000")
       ) {
         const payloadType = line.split(":")[1].split(" ")[0];
-        // Mark for fmtp addition
         this._opusPayloadType = payloadType;
       }
-
-      // Modify or add fmtp for Opus
       if (
         this._opusPayloadType &&
         line.startsWith(`a=fmtp:${this._opusPayloadType}`)
       ) {
-        // Append our params to existing fmtp
-        if (line.includes(";")) {
-          return `${line};${opusParams}`;
-        }
+        if (line.includes(";")) return `${line};${opusParams}`;
         return `${line} ${opusParams}`;
       }
-
       return line;
     });
 
-    // If no fmtp line existed for Opus, add one
     if (this._opusPayloadType) {
       const fmtpExists = munged.some((l) =>
         l.startsWith(`a=fmtp:${this._opusPayloadType}`),
@@ -374,17 +484,38 @@ class WebRTCEngine {
         }
       }
     }
-
     return munged.join("\r\n");
   }
 
-  /**
-   * ICE Restart — seamless recovery on network change (WiFi↔LTE).
-   */
+  // ─── ICE Restart (WiFi↔LTE handoff) ────────────────────────────────────────
+  scheduleIceRestart(delayMs) {
+    if (this._iceRestartTimer) return; // Already scheduled
+    this._iceRestartTimer = setTimeout(() => {
+      this._iceRestartTimer = null;
+      if (
+        this.pc?.iceConnectionState === "disconnected" ||
+        this.pc?.connectionState === "disconnected" ||
+        this.pc?.connectionState === "failed"
+      ) {
+        this.attemptIceRestart();
+      }
+    }, delayMs);
+  }
+
   async attemptIceRestart() {
     if (!this.pc) return;
+    if (this._iceRestartAttempts >= this._maxIceRestarts) {
+      console.error("❌ Max ICE restart attempts reached");
+      this._setState(CALL_STATES.FAILED);
+      return;
+    }
 
-    console.log("🔄 Attempting ICE restart...");
+    this._iceRestartAttempts++;
+    this._setState(CALL_STATES.RECONNECTING);
+    console.log(
+      `🔄 ICE restart attempt ${this._iceRestartAttempts}/${this._maxIceRestarts}`,
+    );
+
     try {
       const offer = await this.pc.createOffer({ iceRestart: true });
       offer.sdp = this.mungeOpusSDP(offer.sdp);
@@ -392,37 +523,66 @@ class WebRTCEngine {
       signalingClient.sendIceRestart(this.callId, offer);
     } catch (err) {
       console.error("ICE restart failed:", err);
+      if (this._iceRestartAttempts >= this._maxIceRestarts) {
+        this._setState(CALL_STATES.FAILED);
+      }
     }
   }
 
-  /**
-   * Switch to audio-only mode (drop video track).
-   */
+  // ─── Media Controls ────────────────────────────────────────────────────────
+  toggleMute() {
+    const audioTrack = this.localStream?.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      return !audioTrack.enabled;
+    }
+    return false;
+  }
+
+  toggleCamera() {
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      return !videoTrack.enabled;
+    }
+    return true;
+  }
+
+  async switchCamera() {
+    const videoTrack = this.localStream?.getVideoTracks()[0];
+    if (videoTrack && typeof videoTrack._switchCamera === "function") {
+      videoTrack._switchCamera();
+    }
+  }
+
+  // ─── Audio/Video Mode Switching ────────────────────────────────────────────
   async switchToAudioOnly() {
     if (this.isAudioOnly) return;
     this.isAudioOnly = true;
 
-    // Remove video track from local stream
     const videoTrack = this.localStream?.getVideoTracks()[0];
     if (videoTrack) {
       videoTrack.stop();
       this.localStream.removeTrack(videoTrack);
-
-      // Remove from peer connection
-      const senders = this.pc.getSenders();
+      const senders = this.pc?.getSenders() || [];
       const videoSender = senders.find((s) => s.track?.kind === "video");
-      if (videoSender) {
-        this.pc.removeTrack(videoSender);
-      }
+      if (videoSender) this.pc.removeTrack(videoSender);
     }
+
+    // ★ Switch InCallManager to audio mode
+    if (InCallManager) {
+      try {
+        InCallManager.setForceSpeakerphoneOn(false);
+      } catch (e) {}
+    }
+
+    // ★ Reduce stats polling frequency to save battery
+    this.pauseStatsPolling();
 
     this.onModeSwitch?.("audio_only", "bandwidth_low");
     console.log("🔇 Switched to audio-only mode");
   }
 
-  /**
-   * Restore video after audio-only mode.
-   */
   async switchToVideoMode() {
     if (!this.isAudioOnly) return;
 
@@ -438,6 +598,17 @@ class WebRTCEngine {
 
       this.isAudioOnly = false;
       this.onLocalStream?.(this.localStream);
+
+      // ★ Switch InCallManager to video mode
+      if (InCallManager) {
+        try {
+          InCallManager.setForceSpeakerphoneOn(true);
+        } catch (e) {}
+      }
+
+      // Resume full stats polling
+      this.resumeStatsPolling();
+
       this.onModeSwitch?.("video", "bandwidth_recovered");
       console.log("📹 Restored video mode");
     } catch (err) {
@@ -445,48 +616,10 @@ class WebRTCEngine {
     }
   }
 
-  /**
-   * Toggle microphone mute.
-   */
-  toggleMute() {
-    const audioTrack = this.localStream?.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      return !audioTrack.enabled; // true = muted
-    }
-    return false;
-  }
-
-  /**
-   * Toggle camera on/off.
-   */
-  toggleCamera() {
-    const videoTrack = this.localStream?.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      return !videoTrack.enabled; // true = camera off
-    }
-    return true; // No video track = camera off
-  }
-
-  /**
-   * Switch front/back camera.
-   */
-  async switchCamera() {
-    const videoTrack = this.localStream?.getVideoTracks()[0];
-    if (videoTrack && typeof videoTrack._switchCamera === "function") {
-      videoTrack._switchCamera();
-    }
-  }
-
-  /**
-   * Adjust video bitrate dynamically.
-   * Called by NetworkMonitor based on bandwidth estimation.
-   */
+  // ─── Video Bitrate Adjustment ──────────────────────────────────────────────
   async adjustVideoBitrate(maxBitrate, maxFramerate) {
     const senders = this.pc?.getSenders() || [];
     const videoSender = senders.find((s) => s.track?.kind === "video");
-
     if (videoSender) {
       try {
         const params = videoSender.getParameters();
@@ -501,26 +634,29 @@ class WebRTCEngine {
     }
   }
 
-  /**
-   * Start polling WebRTC stats for network monitoring.
-   */
+  // ─── Stats Polling (Battery-Aware) ─────────────────────────────────────────
   startStatsPolling() {
+    this._statsActive = true;
     this.statsInterval = setInterval(async () => {
-      if (!this.pc) return;
-
+      if (!this.pc || !this._statsActive) return;
       try {
         const stats = await this.pc.getStats();
         const parsed = this.parseStats(stats);
         this.onStats?.(parsed);
       } catch (err) {
-        // Stats may fail during renegotiation — non-critical
+        // Non-critical — may fail during renegotiation
       }
     }, 2000);
   }
 
-  /**
-   * Parse RTCStatsReport into usable metrics.
-   */
+  pauseStatsPolling() {
+    this._statsActive = false;
+  }
+
+  resumeStatsPolling() {
+    this._statsActive = true;
+  }
+
   parseStats(stats) {
     const result = {
       audio: {
@@ -549,7 +685,7 @@ class WebRTCEngine {
           result.audio.bytesReceived = report.bytesReceived || 0;
           result.audio.packetsLost = report.packetsLost || 0;
           result.audio.packetsReceived = report.packetsReceived || 0;
-          result.audio.jitter = (report.jitter || 0) * 1000; // Convert to ms
+          result.audio.jitter = (report.jitter || 0) * 1000;
           if (result.audio.packetsReceived > 0) {
             result.audio.packetLoss =
               (result.audio.packetsLost /
@@ -569,16 +705,12 @@ class WebRTCEngine {
           }
         }
       }
-
       if (report.type === "outbound-rtp") {
         const kind = report.kind || report.mediaType;
-        if (kind === "audio") {
-          result.audio.bytesSent = report.bytesSent || 0;
-        } else if (kind === "video") {
+        if (kind === "audio") result.audio.bytesSent = report.bytesSent || 0;
+        else if (kind === "video")
           result.video.bytesSent = report.bytesSent || 0;
-        }
       }
-
       if (report.type === "candidate-pair" && report.state === "succeeded") {
         result.connection.rtt = report.currentRoundTripTime
           ? report.currentRoundTripTime * 1000
@@ -587,17 +719,33 @@ class WebRTCEngine {
           report.availableOutgoingBitrate || 0;
       }
     });
-
     return result;
   }
 
-  /**
-   * Clean up everything.
-   */
+  // ─── Cleanup ───────────────────────────────────────────────────────────────
   cleanup() {
+    // ★ Stop InCallManager
+    if (InCallManager) {
+      try {
+        InCallManager.stop();
+        InCallManager.setKeepScreenOn(false);
+      } catch (e) {}
+    }
+
+    // Remove AppState listener
+    if (this._appStateSubscription) {
+      this._appStateSubscription.remove();
+      this._appStateSubscription = null;
+    }
+
+    // Clear timers
     if (this.statsInterval) {
       clearInterval(this.statsInterval);
       this.statsInterval = null;
+    }
+    if (this._iceRestartTimer) {
+      clearTimeout(this._iceRestartTimer);
+      this._iceRestartTimer = null;
     }
 
     // Stop all tracks
@@ -605,13 +753,16 @@ class WebRTCEngine {
       this.localStream.getTracks().forEach((track) => track.stop());
       this.localStream = null;
     }
-
     if (this.remoteStream) {
       this.remoteStream = null;
     }
 
     // Close peer connection
     if (this.pc) {
+      this.pc.onconnectionstatechange = null;
+      this.pc.oniceconnectionstatechange = null;
+      this.pc.ontrack = null;
+      this.pc.onicecandidate = null;
       this.pc.close();
       this.pc = null;
     }
@@ -620,6 +771,14 @@ class WebRTCEngine {
     this.iceCandidateQueue = [];
     this.isAudioOnly = false;
     this._opusPayloadType = null;
+    this._statsActive = true;
+    this._isBackgrounded = false;
+    this._iceRestartAttempts = 0;
+    this._initialized = false;
+    this._pendingOffer = null;
+    this._pendingAnswer = null;
+
+    this._setState(CALL_STATES.IDLE);
   }
 }
 

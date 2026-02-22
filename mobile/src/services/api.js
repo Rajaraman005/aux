@@ -6,10 +6,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { endpoints } from "../config/api";
 
 const STORAGE_KEYS = {
-  ACCESS_TOKEN: "@videocall_access_token",
-  REFRESH_TOKEN: "@videocall_refresh_token",
-  USER: "@videocall_user",
-  DEVICE_ID: "@videocall_device_id",
+  ACCESS_TOKEN: "@aux_access_token",
+  REFRESH_TOKEN: "@aux_refresh_token",
+  USER: "@aux_user",
+  DEVICE_ID: "@aux_device_id",
 };
 
 class ApiClient {
@@ -76,8 +76,23 @@ class ApiClient {
       headers["Authorization"] = `Bearer ${this.accessToken}`;
     }
 
+    console.log(`📡 API ${options.method || "GET"} ${url}`);
+
     try {
-      const response = await fetch(url, { ...options, headers });
+      // Timeout after 30 seconds (signup involves argon2 hashing + email)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+      const response = await fetch(url, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      console.log(
+        `📡 API ${options.method || "GET"} ${url} → ${response.status}`,
+      );
+
       const data = await response.json();
 
       // Token expired — try refresh
@@ -110,10 +125,19 @@ class ApiClient {
       return data;
     } catch (err) {
       if (err.status) throw err;
+
+      // Distinguish timeout from other network errors
+      const isTimeout = err.name === "AbortError";
+      const errorMsg = isTimeout
+        ? "Request timed out. Server may be busy."
+        : "Network error. Check your connection and server IP.";
+
+      console.error(`❌ API Error: ${url}`, err.name, err.message);
+
       throw {
         status: 0,
-        error: "Network error",
-        code: "NETWORK_ERROR",
+        error: errorMsg,
+        code: isTimeout ? "TIMEOUT" : "NETWORK_ERROR",
         details: err.message,
       };
     }

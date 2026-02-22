@@ -1,6 +1,6 @@
 /**
- * Email Verification Screen.
- * 6-digit code input with auto-submit and resend functionality.
+ * OTP Verification Screen — Clean light design.
+ * 6-digit code input, back arrow, black verify button, resend timer.
  */
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
@@ -11,16 +11,10 @@ import {
   Animated,
   StyleSheet,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
 } from "react-native";
 import { useAuth } from "../context/AuthContext";
-import {
-  colors,
-  typography,
-  spacing,
-  radius,
-  shadows,
-  animations,
-} from "../styles/theme";
 
 const CODE_LENGTH = 6;
 
@@ -29,7 +23,7 @@ export default function VerifyScreen({ navigation }) {
   const [code, setCode] = useState(Array(CODE_LENGTH).fill(""));
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(0);
+  const [resendCooldown, setResendCooldown] = useState(60);
   const inputRefs = useRef([]);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -44,7 +38,8 @@ export default function VerifyScreen({ navigation }) {
       }),
       Animated.spring(slideAnim, {
         toValue: 0,
-        ...animations.spring,
+        damping: 20,
+        stiffness: 200,
         useNativeDriver: true,
       }),
     ]).start();
@@ -69,12 +64,10 @@ export default function VerifyScreen({ navigation }) {
       setCode(newCode);
       setError("");
 
-      // Auto-focus next input
       if (text && index < CODE_LENGTH - 1) {
         inputRefs.current[index + 1]?.focus();
       }
 
-      // Auto-submit when all digits entered
       if (newCode.every((d) => d) && newCode.join("").length === CODE_LENGTH) {
         handleVerify(newCode.join(""));
       }
@@ -127,26 +120,36 @@ export default function VerifyScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      <View style={styles.bgOrb} />
-
-      <Animated.View
-        style={[
-          styles.content,
-          { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
-        ]}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1 }}
       >
-        <View style={styles.header}>
-          <Text style={styles.emoji}>✉️</Text>
-          <Text style={styles.title}>Check your email</Text>
-          <Text style={styles.subtitle}>
-            We sent a 6-digit code to{"\n"}
+        <Animated.View
+          style={[
+            styles.content,
+            { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
+          ]}
+        >
+          {/* Back Button */}
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => navigation.goBack()}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <View style={styles.backArrow} />
+          </TouchableOpacity>
+
+          {/* Header */}
+          <View style={styles.header}>
+            <Text style={styles.title}>We just sent an Email</Text>
+            <Text style={styles.subtitle}>
+              Enter the security code we sent to
+            </Text>
             <Text style={styles.emailText}>
               {pendingVerification?.email || "your email"}
             </Text>
-          </Text>
-        </View>
+          </View>
 
-        <View style={styles.card}>
           {/* Code Input */}
           <View style={styles.codeContainer}>
             {Array(CODE_LENGTH)
@@ -172,41 +175,44 @@ export default function VerifyScreen({ navigation }) {
               ))}
           </View>
 
-          {error ? <Text style={styles.errorText}>⚠️ {error}</Text> : null}
+          {/* Error */}
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
           {/* Verify Button */}
           <TouchableOpacity
             style={[styles.verifyButton, isLoading && styles.buttonDisabled]}
             onPress={() => handleVerify()}
             disabled={isLoading}
-            activeOpacity={0.8}
+            activeOpacity={0.85}
           >
             {isLoading ? (
-              <ActivityIndicator color="#fff" />
+              <ActivityIndicator color="#fff" size="small" />
             ) : (
-              <Text style={styles.buttonText}>Verify Email</Text>
+              <Text style={styles.buttonText}>Verify</Text>
             )}
           </TouchableOpacity>
 
           {/* Resend */}
-          <TouchableOpacity
-            onPress={handleResend}
-            disabled={resendCooldown > 0}
-            style={styles.resendLink}
-          >
-            <Text
-              style={[
-                styles.resendText,
-                resendCooldown > 0 && styles.resendDisabled,
-              ]}
+          <View style={styles.resendContainer}>
+            <Text style={styles.resendLabel}>Didn't receive code?</Text>
+            <TouchableOpacity
+              onPress={handleResend}
+              disabled={resendCooldown > 0}
             >
-              {resendCooldown > 0
-                ? `Resend in ${resendCooldown}s`
-                : "Resend code"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      </Animated.View>
+              <Text
+                style={[
+                  styles.resendBold,
+                  resendCooldown > 0 && styles.resendDisabled,
+                ]}
+              >
+                {resendCooldown > 0
+                  ? `Resend in ${resendCooldown}s`
+                  : "Resend code"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </View>
   );
 }
@@ -214,82 +220,143 @@ export default function VerifyScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: colors.bg,
+    backgroundColor: "#FAFAFA",
+  },
+  content: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 50,
+  },
+
+  // Back Button
+  backButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#F0F0F0",
     justifyContent: "center",
-    padding: spacing.lg,
+    alignItems: "center",
+    marginBottom: 32,
+    alignSelf: "flex-start",
   },
-  bgOrb: {
-    position: "absolute",
-    top: "20%",
-    left: "50%",
-    marginLeft: -150,
-    width: 300,
-    height: 300,
-    borderRadius: 150,
-    backgroundColor: "rgba(99, 102, 241, 0.06)",
+  backArrow: {
+    width: 10,
+    height: 10,
+    borderLeftWidth: 2.5,
+    borderBottomWidth: 2.5,
+    borderColor: "#1A1A2E",
+    transform: [{ rotate: "45deg" }],
+    marginLeft: 2,
   },
-  content: { alignItems: "center" },
-  header: { alignItems: "center", marginBottom: spacing.xl },
-  emoji: { fontSize: 64, marginBottom: spacing.md },
-  title: { ...typography.h2, textAlign: "center" },
-  subtitle: {
-    ...typography.bodySmall,
+
+  // Header
+  header: {
+    alignItems: "center",
+    marginBottom: 36,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: "800",
+    color: "#1A1A2E",
+    letterSpacing: -0.5,
+    marginBottom: 10,
     textAlign: "center",
-    marginTop: spacing.sm,
+  },
+  subtitle: {
+    fontSize: 15,
+    color: "#8E8E93",
+    textAlign: "center",
     lineHeight: 22,
   },
-  emailText: { color: colors.primary, fontWeight: "600" },
-  card: {
-    width: "100%",
-    maxWidth: 400,
-    backgroundColor: colors.bgGlass,
-    borderRadius: radius.xl,
-    borderWidth: 1,
-    borderColor: colors.bgGlassBorder,
-    padding: spacing.xl,
-    ...shadows.lg,
-    alignItems: "center",
+  emailText: {
+    fontSize: 15,
+    color: "#1A1A2E",
+    fontWeight: "600",
+    marginTop: 4,
   },
-  codeContainer: { flexDirection: "row", gap: 10, marginBottom: spacing.lg },
+
+  // Code Input
+  codeContainer: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 10,
+    marginBottom: 28,
+  },
   codeInput: {
-    width: 48,
-    height: 56,
-    backgroundColor: colors.bgElevated,
-    borderRadius: radius.md,
-    borderWidth: 2,
-    borderColor: "rgba(99, 102, 241, 0.1)",
+    width: 46,
+    height: 54,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: "#E5E5EA",
     textAlign: "center",
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "700",
-    color: colors.textPrimary,
+    color: "#1A1A2E",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
   },
   codeInputFilled: {
-    borderColor: colors.primary,
-    backgroundColor: colors.bgCard,
+    borderColor: "#fdd63d",
+    backgroundColor: "#FFFDF5",
   },
-  codeInputError: { borderColor: colors.error },
+  codeInputError: {
+    borderColor: "#EF4444",
+  },
+
+  // Error
   errorText: {
-    ...typography.bodySmall,
-    color: colors.error,
-    marginBottom: spacing.md,
+    fontSize: 13,
+    color: "#EF4444",
     textAlign: "center",
+    marginBottom: 16,
+    fontWeight: "500",
   },
+
+  // Button
   verifyButton: {
-    backgroundColor: colors.primary,
-    borderRadius: radius.md,
-    paddingVertical: 16,
-    paddingHorizontal: spacing.xxl,
+    backgroundColor: "#1A1A2E",
+    borderRadius: 14,
+    height: 52,
+    justifyContent: "center",
     alignItems: "center",
-    width: "100%",
-    ...shadows.xl,
+    shadowColor: "#1A1A2E",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
+    marginBottom: 24,
   },
-  buttonDisabled: { backgroundColor: colors.bgElevated, ...shadows.sm },
-  buttonText: { ...typography.button },
-  resendLink: { marginTop: spacing.lg, padding: spacing.sm },
-  resendText: {
-    ...typography.bodySmall,
-    color: colors.primary,
-    fontWeight: "600",
+  buttonDisabled: {
+    backgroundColor: "#C7C7CC",
+    shadowOpacity: 0,
+    elevation: 0,
   },
-  resendDisabled: { color: colors.textMuted },
+  buttonText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: 0.3,
+  },
+
+  // Resend
+  resendContainer: {
+    alignItems: "center",
+  },
+  resendLabel: {
+    fontSize: 14,
+    color: "#8E8E93",
+    marginBottom: 4,
+  },
+  resendBold: {
+    color: "#1A1A2E",
+    fontWeight: "700",
+    fontSize: 14,
+  },
+  resendDisabled: {
+    color: "#C7C7CC",
+  },
 });

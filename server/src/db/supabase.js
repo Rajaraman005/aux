@@ -27,6 +27,9 @@ const memoryStore = {
   refresh_tokens: [],
   call_logs: [],
   abuse_log: [],
+  conversations: [],
+  conversation_participants: [],
+  messages: [],
 };
 
 /**
@@ -346,6 +349,325 @@ const db = {
         a.action === action &&
         a.created_at >= since,
     ).length;
+  },
+
+  // ─── Conversations ──────────────────────────────────────────────────────────
+  async createConversation(participantIds) {
+    const { v4: uuidv4 } = require("uuid");
+    const convId = uuidv4();
+
+    if (supabase) {
+      const { data: conv, error: convErr } = await supabase
+        .from("conversations")
+        .insert({ id: convId })
+        .select()
+        .single();
+      if (convErr) throw convErr;
+
+      const participants = participantIds.map((uid) => ({
+        conversation_id: convId,
+        user_id: uid,
+      }));
+      const { error: partErr } = await supabase
+        .from("conversation_participants")
+        .insert(participants);
+      if (partErr) throw partErr;
+
+      return { id: convId, created_at: conv.created_at };
+    }
+
+    const conv = {
+      id: convId,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    memoryStore.conversations.push(conv);
+    for (const uid of participantIds) {
+      memoryStore.conversation_participants.push({
+        id: uuidv4(),
+        conversation_id: convId,
+        user_id: uid,
+        joined_at: new Date().toISOString(),
+      });
+    }
+    return { id: convId, created_at: conv.created_at };
+  },
+
+  async getConversationBetweenUsers(userIdA, userIdB) {
+    if (supabase) {
+      const { data, error } = await supabase.rpc("find_conversation_between", {
+        user_a: userIdA,
+        user_b: userIdB,
+      });
+      // If RPC doesn't exist, fall back to manual query
+      if (error) {
+        const { data: convs, error: err2 } = await supabase
+          .from("conversation_participants")
+          .select("conversation_id")
+          .in("user_id", [userIdA, userIdB]);
+        if (err2) throw err2;
+        // Find conversation_id that appears twice (both users)
+        const counts = {};
+        for (const row of convs || []) {
+          counts[row.conversation_id] = (counts[row.conversation_id] || 0) + 1;
+        }
+        for (const [cid, count] of Object.entries(counts)) {
+          if (count === 2) return cid;
+        }
+        return null;
+      }
+      return data?.[0]?.conversation_id || null;
+    }
+
+    // In-memory: find conversation with both users
+    const convIds = new Map();
+    for (const p of memoryStore.conversation_participants) {
+      if (p.user_id === userIdA || p.user_id === userIdB) {
+        convIds.set(
+          p.conversation_id,
+          (convIds.get(p.conversation_id) || 0) + 1,
+        );
+      }
+    }
+    for (const [cid, count] of convIds) {
+      if (count === 2) return cid;
+    }
+    return null;
+  },
+
+  async getConversationsForUser(userId, limit = 20, offset = 0) {
+    if (supabase) {
+      // Get conversation IDs for this user
+      const { data: myConvs, error: err1 } = await supabase
+        .from("conversation_participants")
+        .select("conversation_id")
+        .eq("user_id", userId);
+      if (err1) throw err1;
+      if (!myConvs || myConvs.length === 0) return [];
+
+      const convIds = myConvs.map((c) => c.conversation_id);
+
+      // Get other participants for these conversations
+      const { data: allParts, error: err2 } = await supabase
+        .from("conversation_participants")
+        .select("conversation_id, user_id")
+        .in("conversation_id", convIds)
+        .neq("user_id", userId);
+      if (err2) throw err2;
+
+      // Get user info for other participants
+      const otherUserIds = [...new Set((allParts || []).map((p) => p.user_id))];
+      const { data: otherUsers, error: err3 } = await supabase
+        .from("users")
+        .select("id, name, avatar_seed")
+        .in("id", otherUserIds);
+      if (err3) throw err3;
+
+      const userMap = {};
+      for (const u of otherUsers || []) userMap[u.id] = u;
+
+      // Build conversation list with last message
+      const results = [];
+      for (const convId of convIds) {
+        const otherPart = (allParts || []).find(
+          (p) => p.conversation_id === convId,
+        );
+        if (!otherPart) continue;
+        const otherUser = userMap[otherPart.user_id];
+        if (!otherUser) continue;
+
+        // Get last message
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select("content, created_at, sender_id")
+          .eq("conversation_id", convId)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        // Get unread count
+        const { count: unreadCount } = await supabase
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("conversation_id", convId)
+          .neq("sender_id", userId)
+          .is("read_at", null);
+
+        const lastMsg = msgs?.[0] || null;
+        results.push({
+          id: convId,
+          other_user_id: otherUser.id,
+          other_user_name: otherUser.name,
+          other_user_avatar: otherUser.avatar_seed,
+          last_message: lastMsg?.content || null,
+          last_message_at: lastMsg?.created_at || null,
+          last_message_sender: lastMsg?.sender_id || null,
+          unread_count: unreadCount || 0,
+        });
+      }
+
+      // Sort by last message time (newest first)
+      results.sort((a, b) => {
+        const timeA = a.last_message_at || "1970-01-01";
+        const timeB = b.last_message_at || "1970-01-01";
+        return timeB.localeCompare(timeA);
+      });
+
+      return results.slice(offset, offset + limit);
+    }
+
+    // In-memory fallback
+    const myConvIds = memoryStore.conversation_participants
+      .filter((p) => p.user_id === userId)
+      .map((p) => p.conversation_id);
+
+    const results = [];
+    for (const convId of myConvIds) {
+      const otherPart = memoryStore.conversation_participants.find(
+        (p) => p.conversation_id === convId && p.user_id !== userId,
+      );
+      if (!otherPart) continue;
+      const otherUser = memoryStore.users.find(
+        (u) => u.id === otherPart.user_id,
+      );
+      if (!otherUser) continue;
+
+      const convMsgs = memoryStore.messages
+        .filter((m) => m.conversation_id === convId)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      const lastMsg = convMsgs[0] || null;
+      const unreadCount = convMsgs.filter(
+        (m) => m.sender_id !== userId && !m.read_at,
+      ).length;
+
+      results.push({
+        id: convId,
+        other_user_id: otherUser.id,
+        other_user_name: otherUser.name,
+        other_user_avatar: otherUser.avatar_seed,
+        last_message: lastMsg?.content || null,
+        last_message_at: lastMsg?.created_at || null,
+        last_message_sender: lastMsg?.sender_id || null,
+        unread_count: unreadCount,
+      });
+    }
+
+    results.sort((a, b) => {
+      const timeA = a.last_message_at || "1970-01-01";
+      const timeB = b.last_message_at || "1970-01-01";
+      return timeB.localeCompare(timeA);
+    });
+
+    return results.slice(offset, offset + limit);
+  },
+
+  async getMessages(conversationId, limit = 50, offset = 0) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("id, conversation_id, sender_id, content, created_at, read_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (error) throw error;
+      return data || [];
+    }
+    return memoryStore.messages
+      .filter((m) => m.conversation_id === conversationId)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .slice(offset, offset + limit);
+  },
+
+  async createMessage({ conversation_id, sender_id, content }) {
+    const { v4: uuidv4 } = require("uuid");
+    const msgId = uuidv4();
+    const now = new Date().toISOString();
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("messages")
+        .insert({ id: msgId, conversation_id, sender_id, content })
+        .select()
+        .single();
+      if (error) throw error;
+
+      // Update conversation timestamp
+      await supabase
+        .from("conversations")
+        .update({ updated_at: now })
+        .eq("id", conversation_id);
+
+      return data;
+    }
+
+    const msg = {
+      id: msgId,
+      conversation_id,
+      sender_id,
+      content,
+      created_at: now,
+      read_at: null,
+    };
+    memoryStore.messages.push(msg);
+
+    const conv = memoryStore.conversations.find(
+      (c) => c.id === conversation_id,
+    );
+    if (conv) conv.updated_at = now;
+
+    return msg;
+  },
+
+  async markMessagesRead(conversationId, userId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("messages")
+        .update({ read_at: new Date().toISOString() })
+        .eq("conversation_id", conversationId)
+        .neq("sender_id", userId)
+        .is("read_at", null);
+      if (error) throw error;
+      return;
+    }
+    const now = new Date().toISOString();
+    for (const msg of memoryStore.messages) {
+      if (
+        msg.conversation_id === conversationId &&
+        msg.sender_id !== userId &&
+        !msg.read_at
+      ) {
+        msg.read_at = now;
+      }
+    }
+  },
+
+  async getConversationParticipants(conversationId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("conversation_participants")
+        .select("user_id")
+        .eq("conversation_id", conversationId);
+      if (error) throw error;
+      return (data || []).map((p) => p.user_id);
+    }
+    return memoryStore.conversation_participants
+      .filter((p) => p.conversation_id === conversationId)
+      .map((p) => p.user_id);
+  },
+
+  async isConversationParticipant(conversationId, userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("conversation_participants")
+        .select("id")
+        .eq("conversation_id", conversationId)
+        .eq("user_id", userId)
+        .single();
+      if (error && error.code !== "PGRST116") throw error;
+      return !!data;
+    }
+    return memoryStore.conversation_participants.some(
+      (p) => p.conversation_id === conversationId && p.user_id === userId,
+    );
   },
 };
 

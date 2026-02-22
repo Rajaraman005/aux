@@ -144,6 +144,15 @@ function initializeSignaling(wss) {
           case "call-metrics":
             await handleCallMetrics(message);
             break;
+          case "chat-message":
+            await handleChatMessage(userId, userName, message, ws);
+            break;
+          case "typing":
+            await handleTyping(userId, message);
+            break;
+          case "message-read":
+            await handleMessageRead(userId, message);
+            break;
           case "heartbeat":
             ws.send(
               JSON.stringify({ type: "heartbeat-ack", timestamp: Date.now() }),
@@ -478,6 +487,94 @@ async function finalizeCall(callId, reason) {
 
   // Clean up after a delay (allow late ICE candidates)
   setTimeout(() => activeCalls.delete(callId), 5000);
+}
+
+// ─── Chat Message Handlers ──────────────────────────────────────────────────
+
+async function handleChatMessage(userId, userName, message, ws) {
+  const { conversationId, content, tempId } = message;
+  if (!conversationId || !content || content.trim().length === 0) return;
+  if (content.length > 5000) return;
+
+  try {
+    // Save to database
+    const savedMessage = await db.createMessage({
+      conversation_id: conversationId,
+      sender_id: userId,
+      content: content.trim(),
+    });
+
+    // Confirm to sender (maps tempId to permanent ID)
+    ws.send(
+      JSON.stringify({
+        type: "message-confirmed",
+        tempId,
+        message: savedMessage,
+      }),
+    );
+
+    // Deliver to other participants
+    const participants = await db.getConversationParticipants(conversationId);
+    for (const participantId of participants) {
+      if (participantId !== userId) {
+        await presence.sendToUser(participantId, {
+          type: "message-received",
+          conversationId,
+          message: { ...savedMessage, senderName: userName },
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Chat message error:", err.message);
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        code: "CHAT_ERROR",
+        message: "Failed to send message",
+      }),
+    );
+  }
+}
+
+async function handleTyping(userId, message) {
+  const { conversationId } = message;
+  if (!conversationId) return;
+
+  try {
+    const participants = await db.getConversationParticipants(conversationId);
+    for (const participantId of participants) {
+      if (participantId !== userId) {
+        await presence.sendToUser(participantId, {
+          type: "typing",
+          conversationId,
+          userId,
+        });
+      }
+    }
+  } catch (err) {
+    // Non-critical — don't fail on typing indicator
+  }
+}
+
+async function handleMessageRead(userId, message) {
+  const { conversationId } = message;
+  if (!conversationId) return;
+
+  try {
+    await db.markMessagesRead(conversationId, userId);
+    const participants = await db.getConversationParticipants(conversationId);
+    for (const participantId of participants) {
+      if (participantId !== userId) {
+        await presence.sendToUser(participantId, {
+          type: "messages-read",
+          conversationId,
+          readBy: userId,
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Message read error:", err.message);
+  }
 }
 
 module.exports = { initializeSignaling, activeCalls };
