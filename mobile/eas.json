@@ -4,7 +4,6 @@
     "appVersionSource": "local"
   },
   "build": {
-    "base": "mobile",
     "development": {
       "developmentClient": true,
       "distribution": "internal",
