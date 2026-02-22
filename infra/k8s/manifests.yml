@@ -1,0 +1,223 @@
+# ─── Signaling Server Deployment ──────────────────────────────────────────────
+# HPA: 2-10 replicas based on CPU/WebSocket connection count
+# Anti-affinity: spread across nodes for fault tolerance
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signaling-server
+  namespace: videocall
+  labels:
+    app: signaling
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: signaling
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: signaling
+        tier: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values: [signaling]
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: signaling
+          image: videocall/signaling:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            - name: REDIS_URL
+              value: "redis://redis-master:6379"
+          envFrom:
+            - secretRef:
+                name: videocall-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+# ─── Service (ClusterIP for internal, LoadBalancer for external) ──────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: signaling-service
+  namespace: videocall
+spec:
+  type: LoadBalancer
+  selector:
+    app: signaling
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+      protocol: TCP
+  sessionAffinity: None # WebSocket sticky sessions handled at ingress level
+---
+# ─── Horizontal Pod Autoscaler ────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: signaling-hpa
+  namespace: videocall
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: signaling-server
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 120
+---
+# ─── Namespace ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: videocall
+  labels:
+    app: videocall
+---
+# ─── Secrets Template ─────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: videocall-secrets
+  namespace: videocall
+type: Opaque
+stringData:
+  SUPABASE_URL: "__YOUR_SUPABASE_URL__"
+  SUPABASE_KEY: "__YOUR_SUPABASE_KEY__"
+  JWT_SECRET: "__YOUR_JWT_SECRET__"
+  JWT_REFRESH_SECRET: "__YOUR_REFRESH_SECRET__"
+  TURN_SECRET: "__YOUR_TURN_SECRET__"
+  SMTP_HOST: "__SMTP_HOST__"
+  SMTP_PORT: "587"
+  SMTP_USER: "__SMTP_USER__"
+  SMTP_PASS: "__SMTP_PASS__"
+  EMAIL_FROM: "noreply@videocall.app"
+---
+# ─── TURN Server DaemonSet (one per node) ─────────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: turn-server
+  namespace: videocall
+spec:
+  selector:
+    matchLabels:
+      app: turn
+  template:
+    metadata:
+      labels:
+        app: turn
+    spec:
+      hostNetwork: true # TURN needs host networking for relay
+      containers:
+        - name: coturn
+          image: coturn/coturn:latest
+          ports:
+            - containerPort: 3478
+              hostPort: 3478
+              protocol: UDP
+            - containerPort: 3478
+              hostPort: 3478
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
+          volumeMounts:
+            - name: turn-config
+              mountPath: /etc/coturn/turnserver.conf
+              subPath: turnserver.conf
+      volumes:
+        - name: turn-config
+          configMap:
+            name: turn-config
+---
+# ─── TURN ConfigMap ───────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: turn-config
+  namespace: videocall
+data:
+  turnserver.conf: |
+    listening-port=3478
+    use-auth-secret
+    static-auth-secret=KPk9rnV1NLUcSHqCCYOG-UsmzH-jAcKlqO9NZAsfLKLFOc6DGQqua7I3FpFbzbq6
+    realm=videocall.app
+    min-port=49152
+    max-port=49200
+    fingerprint
+    no-multicast-peers
+    no-cli
+    verbose

@@ -1,0 +1,28 @@
+# Prometheus Configuration
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+# Alerting rules
+rule_files:
+  - "alert_rules.yml"
+
+# Scrape targets
+scrape_configs:
+  # Signaling server metrics
+  - job_name: "signaling"
+    static_configs:
+      - targets: ["signaling:3000"]
+    metrics_path: /metrics
+    scrape_interval: 5s
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Redis (if redis-exporter is deployed)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']

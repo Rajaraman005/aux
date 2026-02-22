@@ -1,0 +1,50 @@
+# Prometheus Alerting Rules
+groups:
+  - name: call_quality_alerts
+    rules:
+      # High packet loss alert
+      - alert: HighPacketLoss
+        expr: histogram_quantile(0.95, rate(videocall_packet_loss_bucket[5m])) > 15
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High packet loss detected (> 15%)"
+          description: "95th percentile packet loss is {{ $value }}%"
+
+      # High jitter alert
+      - alert: HighJitter
+        expr: histogram_quantile(0.95, rate(videocall_jitter_ms_bucket[5m])) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High jitter detected (> 100ms)"
+          description: "95th percentile jitter is {{ $value }}ms"
+
+      # High RTT alert
+      - alert: HighRTT
+        expr: histogram_quantile(0.95, rate(videocall_rtt_ms_bucket[5m])) > 300
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High RTT detected (> 300ms)"
+
+      # WebSocket connection spike
+      - alert: HighConnectionCount
+        expr: videocall_websocket_connections > 10000
+        for: 1m
+        labels:
+          severity: info
+        annotations:
+          summary: "High WebSocket connection count: {{ $value }}"
+
+      # Call failure rate
+      - alert: HighCallFailureRate
+        expr: rate(videocall_calls_total{status="failed"}[5m]) / rate(videocall_calls_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Call failure rate > 10%"

@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "VideoCall",
+    "slug": "videocall",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0a1a"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.videocall.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "VideoCall needs camera access for video calls",
+        "NSMicrophoneUsageDescription": "VideoCall needs microphone access for audio calls",
+        "UIBackgroundModes": ["voip", "audio"]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0a1a"
+      },
+      "package": "com.videocall.app",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.INTERNET"
+      ]
+    },
+    "plugins": ["@config-plugins/react-native-webrtc"]
+  }
+}
