@@ -9,19 +9,14 @@
     "splash": {
       "backgroundColor": "#0a0a1a"
     },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aux.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Aux needs camera access for video calls",
         "NSMicrophoneUsageDescription": "Aux needs microphone access for audio calls",
-        "UIBackgroundModes": [
-          "voip",
-          "audio"
-        ]
+        "UIBackgroundModes": ["voip", "audio"]
       },
       "bitcode": false
     },
@@ -42,7 +37,14 @@
       ]
     },
     "plugins": [
-      "@config-plugins/react-native-webrtc"
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "Aux needs camera access for video calls",
+          "microphonePermission": "Aux needs microphone access for audio calls",
+          "androidAbiFilters": ["arm64-v8a"]
+        }
+      ]
     ],
     "extra": {
       "eas": {
