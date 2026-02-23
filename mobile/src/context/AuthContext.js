@@ -11,6 +11,10 @@ import React, {
 } from "react";
 import apiClient, { STORAGE_KEYS } from "../services/api";
 import { endpoints } from "../config/api";
+import {
+  registerPushNotifications,
+  unregisterPushNotifications,
+} from "../services/notifications";
 
 const AuthContext = createContext(null);
 
@@ -36,6 +40,8 @@ export function AuthProvider({ children }) {
             const fresh = await apiClient.get(endpoints.users.me);
             setUser(fresh);
             await apiClient.saveUser(fresh);
+            // Register push token on app startup if authenticated
+            registerPushNotifications();
           } catch (err) {
             // Token invalid — clear state
             if (err.code === "SESSION_EXPIRED") {
@@ -78,6 +84,15 @@ export function AuthProvider({ children }) {
         code,
       });
       setPendingVerification(null);
+
+      // Auto-login: the verify endpoint now returns tokens + user
+      if (result.accessToken && result.user) {
+        await apiClient.setTokens(result.accessToken, result.refreshToken);
+        await apiClient.saveUser(result.user);
+        setUser(result.user);
+        setIsAuthenticated(true);
+      }
+
       return result;
     },
     [pendingVerification],
@@ -111,11 +126,21 @@ export function AuthProvider({ children }) {
 
     setUser(result.user);
     setIsAuthenticated(true);
+
+    // Register push token after login
+    registerPushNotifications();
+
     return result;
   }, []);
 
   // ─── Logout ───────────────────────────────────────────────────────────────
   const logout = useCallback(async () => {
+    try {
+      // Unregister push token before logout
+      await unregisterPushNotifications();
+    } catch {
+      // Continue logout even if push unregister fails
+    }
     try {
       const deviceId = await apiClient.getDeviceId();
       await apiClient.post(endpoints.auth.logout, { deviceId });
@@ -128,8 +153,22 @@ export function AuthProvider({ children }) {
     setPendingVerification(null);
   }, []);
 
+  // ─── Refresh Profile ──────────────────────────────────────────────────────
+  const refreshProfile = useCallback(async () => {
+    try {
+      const fresh = await apiClient.get(endpoints.users.me);
+      setUser(fresh);
+      await apiClient.saveUser(fresh);
+      return fresh;
+    } catch (err) {
+      console.error("Profile refresh error:", err);
+      throw err;
+    }
+  }, []);
+
   const value = {
     user,
+    setUser,
     isLoading,
     isAuthenticated,
     pendingVerification,
@@ -138,6 +177,7 @@ export function AuthProvider({ children }) {
     resendCode,
     login,
     logout,
+    refreshProfile,
     accessToken: apiClient.accessToken,
   };
 

@@ -31,6 +31,9 @@ const memoryStore = {
   conversation_participants: [],
   messages: [],
   world_messages: [],
+  push_tokens: [],
+  friend_requests: [],
+  notifications: [],
 };
 
 /**
@@ -57,6 +60,8 @@ const db = {
       password_hash,
       avatar_seed,
       email_verified: false,
+      is_private: false,
+      secret_name: null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -83,7 +88,9 @@ const db = {
     if (supabase) {
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, avatar_seed, email_verified, created_at")
+        .select(
+          "id, name, email, phone, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+        )
         .eq("id", id)
         .single();
       if (error && error.code !== "PGRST116") throw error;
@@ -113,22 +120,48 @@ const db = {
 
   async searchUsers(query, limit = 20, offset = 0) {
     if (supabase) {
+      // First, try exact secret_name match (for private users)
+      const { data: secretMatch } = await supabase
+        .from("users")
+        .select(
+          "id, name, email, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+        )
+        .eq("email_verified", true)
+        .eq("secret_name", query)
+        .limit(1);
+
+      // Then search public users by name/email (excluding private users)
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, avatar_seed, email_verified, created_at")
+        .select(
+          "id, name, email, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+        )
         .eq("email_verified", true)
+        .or("is_private.is.null,is_private.eq.false")
         .or(`name.ilike.%${query}%,email.ilike.%${query}%`)
         .range(offset, offset + limit - 1)
         .order("name");
       if (error) throw error;
-      return data || [];
+
+      // Merge: secret_name matches + public matches (deduplicate)
+      const results = [...(secretMatch || [])];
+      const ids = new Set(results.map((u) => u.id));
+      for (const u of data || []) {
+        if (!ids.has(u.id)) results.push(u);
+      }
+      return results;
     }
+    const q = query.toLowerCase();
     return memoryStore.users
       .filter(
         (u) =>
           u.email_verified &&
-          (u.name.toLowerCase().includes(query.toLowerCase()) ||
-            u.email.toLowerCase().includes(query.toLowerCase())),
+          // Exact secret_name match (private users)
+          ((u.secret_name && u.secret_name === query) ||
+            // Public user name/email match
+            (!u.is_private &&
+              (u.name.toLowerCase().includes(q) ||
+                u.email.toLowerCase().includes(q)))),
       )
       .slice(offset, offset + limit)
       .map(({ password_hash, ...safe }) => safe);
@@ -138,15 +171,16 @@ const db = {
     if (supabase) {
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, avatar_seed, created_at")
+        .select("id, name, email, bio, avatar_seed, is_private, created_at")
         .eq("email_verified", true)
+        .or("is_private.is.null,is_private.eq.false")
         .range(offset, offset + limit - 1)
         .order("name");
       if (error) throw error;
       return data || [];
     }
     return memoryStore.users
-      .filter((u) => u.email_verified)
+      .filter((u) => u.email_verified && !u.is_private)
       .slice(offset, offset + limit)
       .map(({ password_hash, ...safe }) => safe);
   },
@@ -671,7 +705,14 @@ const db = {
       return data;
     }
 
-    const msg = { id: msgId, sender_id, sender_name, sender_avatar, content, created_at: now };
+    const msg = {
+      id: msgId,
+      sender_id,
+      sender_name,
+      sender_avatar,
+      content,
+      created_at: now,
+    };
     memoryStore.world_messages.push(msg);
     // Keep only the last 500 messages in memory
     if (memoryStore.world_messages.length > 500) {
@@ -684,7 +725,9 @@ const db = {
     if (supabase) {
       let query = supabase
         .from("world_messages")
-        .select("id, sender_id, sender_name, sender_avatar, content, created_at")
+        .select(
+          "id, sender_id, sender_name, sender_avatar, content, created_at",
+        )
         .order("created_at", { ascending: false })
         .limit(limit);
       if (before) query = query.lt("created_at", before);
@@ -711,6 +754,636 @@ const db = {
     return memoryStore.conversation_participants.some(
       (p) => p.conversation_id === conversationId && p.user_id === userId,
     );
+  },
+
+  // ─── Push Tokens ────────────────────────────────────────────────────────────
+  async savePushToken(userId, token, platform, deviceId) {
+    if (supabase) {
+      const { data, error } = await supabase.from("push_tokens").upsert(
+        {
+          user_id: userId,
+          token,
+          platform: platform || "android",
+          device_id: deviceId || "unknown",
+          last_used_at: new Date().toISOString(),
+        },
+        { onConflict: "token" },
+      );
+      if (error) throw error;
+      return data;
+    }
+    // In-memory fallback
+    const existing = memoryStore.push_tokens.find((t) => t.token === token);
+    if (existing) {
+      existing.last_used_at = new Date().toISOString();
+      return existing;
+    }
+    const entry = {
+      id: require("uuid").v4(),
+      user_id: userId,
+      token,
+      platform: platform || "android",
+      device_id: deviceId || "unknown",
+      created_at: new Date().toISOString(),
+      last_used_at: new Date().toISOString(),
+    };
+    memoryStore.push_tokens.push(entry);
+    return entry;
+  },
+
+  async deletePushToken(token) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("push_tokens")
+        .delete()
+        .eq("token", token);
+      if (error) throw error;
+      return;
+    }
+    memoryStore.push_tokens = memoryStore.push_tokens.filter(
+      (t) => t.token !== token,
+    );
+  },
+
+  async deleteUserTokens(userId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("push_tokens")
+        .delete()
+        .eq("user_id", userId);
+      if (error) throw error;
+      return;
+    }
+    memoryStore.push_tokens = memoryStore.push_tokens.filter(
+      (t) => t.user_id !== userId,
+    );
+  },
+
+  async getPushTokens(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("push_tokens")
+        .select("*")
+        .eq("user_id", userId);
+      if (error) throw error;
+      return data || [];
+    }
+    return memoryStore.push_tokens.filter((t) => t.user_id === userId);
+  },
+
+  async updateTokenLastUsed(token) {
+    if (supabase) {
+      await supabase
+        .from("push_tokens")
+        .update({ last_used_at: new Date().toISOString() })
+        .eq("token", token);
+      return;
+    }
+    const entry = memoryStore.push_tokens.find((t) => t.token === token);
+    if (entry) entry.last_used_at = new Date().toISOString();
+  },
+  // ─── Profile Updates ──────────────────────────────────────────────────────
+  async updateUserProfile(userId, { name, bio, is_private, secret_name }) {
+    const updates = { updated_at: new Date().toISOString() };
+    if (name !== undefined) updates.name = name.trim();
+    if (bio !== undefined) updates.bio = bio || null;
+    if (is_private !== undefined) updates.is_private = is_private;
+    if (secret_name !== undefined) updates.secret_name = secret_name || null;
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("users")
+        .update(updates)
+        .eq("id", userId)
+        .select(
+          "id, name, email, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+        )
+        .single();
+      if (error) throw error;
+      return data;
+    }
+    const user = memoryStore.users.find((u) => u.id === id);
+    if (user) Object.assign(user, updates);
+    const { password_hash, ...safe } = user;
+    return safe;
+  },
+
+  async updateUserPassword(userId, passwordHash) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("users")
+        .update({
+          password_hash: passwordHash,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", userId);
+      if (error) throw error;
+      return;
+    }
+    const user = memoryStore.users.find((u) => u.id === userId);
+    if (user) {
+      user.password_hash = passwordHash;
+      user.updated_at = new Date().toISOString();
+    }
+  },
+
+  async getUserBySecretName(secretName) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("users")
+        .select(
+          "id, name, email, avatar_seed, email_verified, is_private, secret_name, created_at",
+        )
+        .eq("secret_name", secretName)
+        .single();
+      if (error && error.code !== "PGRST116") throw error;
+      return data;
+    }
+    const user = memoryStore.users.find((u) => u.secret_name === secretName);
+    if (!user) return null;
+    const { password_hash, ...safe } = user;
+    return safe;
+  },
+
+  async getUserWithPassword(id) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", id)
+        .single();
+      if (error && error.code !== "PGRST116") throw error;
+      return data;
+    }
+    return memoryStore.users.find((u) => u.id === id) || null;
+  },
+
+  // ─── Friend Requests ──────────────────────────────────────────────────────
+  async sendFriendRequest(senderId, receiverId) {
+    const { v4: uuidv4 } = require("uuid");
+    const id = uuidv4();
+    const now = new Date().toISOString();
+
+    if (supabase) {
+      // Check if request already exists (in either direction)
+      const { data: existing } = await supabase
+        .from("friend_requests")
+        .select("id, status")
+        .or(
+          `and(sender_id.eq.${senderId},receiver_id.eq.${receiverId}),and(sender_id.eq.${receiverId},receiver_id.eq.${senderId})`,
+        )
+        .limit(1);
+      if (existing && existing.length > 0) {
+        if (existing[0].status === "accepted") return { alreadyFriends: true };
+        if (existing[0].status === "pending") return { alreadyPending: true };
+      }
+
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .insert({ id, sender_id: senderId, receiver_id: receiverId })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+    // In-memory
+    const existing = memoryStore.friend_requests.find(
+      (r) =>
+        (r.sender_id === senderId && r.receiver_id === receiverId) ||
+        (r.sender_id === receiverId && r.receiver_id === senderId),
+    );
+    if (existing) {
+      if (existing.status === "accepted") return { alreadyFriends: true };
+      if (existing.status === "pending") return { alreadyPending: true };
+    }
+    const req = {
+      id,
+      sender_id: senderId,
+      receiver_id: receiverId,
+      status: "pending",
+      created_at: now,
+      updated_at: now,
+    };
+    memoryStore.friend_requests.push(req);
+    return req;
+  },
+
+  async withdrawFriendRequest(senderId, targetUserId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .delete()
+        .eq("sender_id", senderId)
+        .eq("receiver_id", targetUserId)
+        .eq("status", "pending")
+        .select()
+        .single();
+      if (error && error.code === "PGRST116") return null; // not found
+      if (error) throw error;
+      return data;
+    }
+    // In-memory
+    const idx = memoryStore.friend_requests.findIndex(
+      (r) =>
+        r.sender_id === senderId &&
+        r.receiver_id === targetUserId &&
+        r.status === "pending",
+    );
+    if (idx === -1) return null;
+    const [removed] = memoryStore.friend_requests.splice(idx, 1);
+    return removed;
+  },
+
+  async respondFriendRequest(requestId, userId, status) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .update({ status, updated_at: new Date().toISOString() })
+        .eq("id", requestId)
+        .eq("receiver_id", userId)
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+    const req = memoryStore.friend_requests.find(
+      (r) => r.id === requestId && r.receiver_id === userId,
+    );
+    if (req) {
+      req.status = status;
+      req.updated_at = new Date().toISOString();
+    }
+    return req;
+  },
+
+  async getFriendRequests(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .select("id, sender_id, status, created_at")
+        .eq("receiver_id", userId)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+
+      // Enrich with sender info
+      const enriched = [];
+      for (const req of data || []) {
+        const { data: sender } = await supabase
+          .from("users")
+          .select("id, name, avatar_seed")
+          .eq("id", req.sender_id)
+          .single();
+        enriched.push({
+          ...req,
+          sender_name: sender?.name || "Unknown",
+          sender_avatar: sender?.avatar_seed || sender?.name || "?",
+        });
+      }
+      return enriched;
+    }
+    return memoryStore.friend_requests
+      .filter((r) => r.receiver_id === userId && r.status === "pending")
+      .map((r) => {
+        const sender = memoryStore.users.find((u) => u.id === r.sender_id);
+        return {
+          ...r,
+          sender_name: sender?.name || "Unknown",
+          sender_avatar: sender?.avatar_seed || sender?.name || "?",
+        };
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  async areFriends(userA, userB) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .select("id")
+        .eq("status", "accepted")
+        .or(
+          `and(sender_id.eq.${userA},receiver_id.eq.${userB}),and(sender_id.eq.${userB},receiver_id.eq.${userA})`,
+        )
+        .limit(1);
+      if (error) throw error;
+      return (data || []).length > 0;
+    }
+    return memoryStore.friend_requests.some(
+      (r) =>
+        r.status === "accepted" &&
+        ((r.sender_id === userA && r.receiver_id === userB) ||
+          (r.sender_id === userB && r.receiver_id === userA)),
+    );
+  },
+
+  async getFriends(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .select("sender_id, receiver_id")
+        .eq("status", "accepted")
+        .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+      if (error) throw error;
+
+      const friendIds = (data || []).map((r) =>
+        r.sender_id === userId ? r.receiver_id : r.sender_id,
+      );
+      if (friendIds.length === 0) return [];
+
+      const { data: friends } = await supabase
+        .from("users")
+        .select("id, name, avatar_seed")
+        .in("id", friendIds);
+      return friends || [];
+    }
+    const friendIds = memoryStore.friend_requests
+      .filter(
+        (r) =>
+          r.status === "accepted" &&
+          (r.sender_id === userId || r.receiver_id === userId),
+      )
+      .map((r) => (r.sender_id === userId ? r.receiver_id : r.sender_id));
+    return memoryStore.users
+      .filter((u) => friendIds.includes(u.id))
+      .map(({ password_hash, ...safe }) => safe);
+  },
+
+  async getFriendRequestStatus(senderId, receiverId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("friend_requests")
+        .select("id, sender_id, receiver_id, status")
+        .or(
+          `and(sender_id.eq.${senderId},receiver_id.eq.${receiverId}),and(sender_id.eq.${receiverId},receiver_id.eq.${senderId})`,
+        )
+        .limit(1);
+      if (error) throw error;
+      return data?.[0] || null;
+    }
+    return (
+      memoryStore.friend_requests.find(
+        (r) =>
+          (r.sender_id === senderId && r.receiver_id === receiverId) ||
+          (r.sender_id === receiverId && r.receiver_id === senderId),
+      ) || null
+    );
+  },
+
+  // ─── Notifications ────────────────────────────────────────────────────────
+
+  /**
+   * Create a notification with deduplication.
+   * If a matching group_key exists within the aggregation window, update instead of insert.
+   */
+  async createNotification({
+    user_id,
+    type,
+    title,
+    body,
+    data = {},
+    priority = 0,
+    group_key = null,
+  }) {
+    const AGGREGATION_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+    if (supabase) {
+      // Check for existing notification with same group_key within window
+      if (group_key) {
+        const windowStart = new Date(
+          Date.now() - AGGREGATION_WINDOW_MS,
+        ).toISOString();
+        const { data: existing } = await supabase
+          .from("notifications")
+          .select("id, data")
+          .eq("group_key", group_key)
+          .eq("user_id", user_id)
+          .is("deleted_at", null)
+          .gte("created_at", windowStart)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (existing && existing.length > 0) {
+          const prev = existing[0];
+          const count = (prev.data?.count || 1) + 1;
+          const { data: updated, error } = await supabase
+            .from("notifications")
+            .update({
+              body,
+              data: { ...prev.data, ...data, count },
+              read: false,
+              created_at: new Date().toISOString(),
+            })
+            .eq("id", prev.id)
+            .select()
+            .single();
+          if (error) throw error;
+          return updated;
+        }
+      }
+
+      const { data: row, error } = await supabase
+        .from("notifications")
+        .insert({
+          user_id,
+          type,
+          title,
+          body,
+          data: { ...data, count: 1 },
+          priority,
+          group_key,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      return row;
+    }
+
+    // In-memory fallback
+    if (group_key) {
+      const windowStart = Date.now() - AGGREGATION_WINDOW_MS;
+      const existing = memoryStore.notifications.find(
+        (n) =>
+          n.group_key === group_key &&
+          n.user_id === user_id &&
+          !n.deleted_at &&
+          new Date(n.created_at).getTime() >= windowStart,
+      );
+      if (existing) {
+        const count = (existing.data?.count || 1) + 1;
+        existing.body = body;
+        existing.data = { ...existing.data, ...data, count };
+        existing.read = false;
+        existing.created_at = new Date().toISOString();
+        return existing;
+      }
+    }
+    const notif = {
+      id: require("crypto").randomUUID(),
+      user_id,
+      type,
+      title,
+      body,
+      data: { ...data, count: 1 },
+      priority,
+      read: false,
+      group_key,
+      deleted_at: null,
+      created_at: new Date().toISOString(),
+    };
+    memoryStore.notifications.push(notif);
+    return notif;
+  },
+
+  /**
+   * Get notifications with cursor-based pagination.
+   * Returns { notifications, unread_count, next_cursor }.
+   */
+  async getNotifications(
+    userId,
+    { unreadOnly = false, cursor = null, limit = 20 } = {},
+  ) {
+    if (supabase) {
+      let query = supabase
+        .from("notifications")
+        .select("*")
+        .eq("user_id", userId)
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false })
+        .limit(limit + 1); // fetch one extra for next_cursor
+
+      if (unreadOnly) query = query.eq("read", false);
+      if (cursor) query = query.lt("created_at", cursor);
+
+      const { data: rows, error } = await query;
+      if (error) throw error;
+
+      // Unread count
+      const { count } = await supabase
+        .from("notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("read", false)
+        .is("deleted_at", null);
+
+      const hasMore = rows.length > limit;
+      const notifications = hasMore ? rows.slice(0, limit) : rows;
+      const next_cursor = hasMore
+        ? notifications[notifications.length - 1].created_at
+        : null;
+
+      return { notifications, unread_count: count || 0, next_cursor };
+    }
+
+    // In-memory
+    let items = memoryStore.notifications
+      .filter((n) => n.user_id === userId && !n.deleted_at)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    if (unreadOnly) items = items.filter((n) => !n.read);
+    if (cursor) items = items.filter((n) => n.created_at < cursor);
+
+    const unread_count = memoryStore.notifications.filter(
+      (n) => n.user_id === userId && !n.deleted_at && !n.read,
+    ).length;
+
+    const hasMore = items.length > limit;
+    const notifications = items.slice(0, limit);
+    const next_cursor = hasMore
+      ? notifications[notifications.length - 1].created_at
+      : null;
+
+    return { notifications, unread_count, next_cursor };
+  },
+
+  /**
+   * Mark a single notification as read (validates ownership).
+   */
+  async markNotificationRead(notifId, userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("notifications")
+        .update({ read: true })
+        .eq("id", notifId)
+        .eq("user_id", userId)
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+    const n = memoryStore.notifications.find(
+      (n) => n.id === notifId && n.user_id === userId,
+    );
+    if (n) n.read = true;
+    return n || null;
+  },
+
+  /**
+   * Mark all notifications as read for a user.
+   */
+  async markAllRead(userId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("notifications")
+        .update({ read: true })
+        .eq("user_id", userId)
+        .eq("read", false)
+        .is("deleted_at", null);
+      if (error) throw error;
+      return true;
+    }
+    memoryStore.notifications
+      .filter((n) => n.user_id === userId && !n.deleted_at)
+      .forEach((n) => (n.read = true));
+    return true;
+  },
+
+  /**
+   * Fast unread count for badge.
+   */
+  async getUnreadCount(userId) {
+    if (supabase) {
+      const { count, error } = await supabase
+        .from("notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", userId)
+        .eq("read", false)
+        .is("deleted_at", null);
+      if (error) throw error;
+      return count || 0;
+    }
+    return memoryStore.notifications.filter(
+      (n) => n.user_id === userId && !n.deleted_at && !n.read,
+    ).length;
+  },
+
+  /**
+   * Cleanup: hard-delete soft-deleted rows older than `days`
+   * and auto-expire notifications older than `days`.
+   */
+  async cleanupExpiredNotifications(days = 90) {
+    const cutoff = new Date(
+      Date.now() - days * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    if (supabase) {
+      // Hard-delete soft-deleted rows
+      await supabase
+        .from("notifications")
+        .delete()
+        .not("deleted_at", "is", null)
+        .lt("deleted_at", cutoff);
+      // Soft-delete ancient active rows
+      await supabase
+        .from("notifications")
+        .update({ deleted_at: new Date().toISOString() })
+        .is("deleted_at", null)
+        .lt("created_at", cutoff);
+      return true;
+    }
+    memoryStore.notifications = memoryStore.notifications.filter(
+      (n) =>
+        !(n.deleted_at && n.deleted_at < cutoff) && !(n.created_at < cutoff),
+    );
+    return true;
   },
 };
 

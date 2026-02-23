@@ -58,25 +58,21 @@ router.post(
         confirmPassword,
       });
       if (errors.length > 0) {
-        return res
-          .status(400)
-          .json({
-            error: "Validation failed",
-            details: errors,
-            code: "VALIDATION_ERROR",
-          });
+        return res.status(400).json({
+          error: "Validation failed",
+          details: errors,
+          code: "VALIDATION_ERROR",
+        });
       }
 
       // Check for existing user
       const existing = await db.getUserByEmail(email.toLowerCase());
       if (existing) {
         metrics.authAttempts.inc({ action: "signup", result: "duplicate" });
-        return res
-          .status(409)
-          .json({
-            error: "An account with this email already exists",
-            code: "EMAIL_EXISTS",
-          });
+        return res.status(409).json({
+          error: "An account with this email already exists",
+          code: "EMAIL_EXISTS",
+        });
       }
 
       // Hash password with Argon2id (memory-hard, GPU-resistant)
@@ -134,23 +130,19 @@ router.post("/verify", authLimiter, async (req, res) => {
     const { userId, code } = req.body;
 
     if (!userId || !code || code.length !== 6) {
-      return res
-        .status(400)
-        .json({
-          error: "Valid userId and 6-digit code are required",
-          code: "VALIDATION_ERROR",
-        });
+      return res.status(400).json({
+        error: "Valid userId and 6-digit code are required",
+        code: "VALIDATION_ERROR",
+      });
     }
 
     const verification = await db.getVerificationCode(userId, code);
     if (!verification) {
       await recordFailure(req.ip, "failed_login", userId);
-      return res
-        .status(400)
-        .json({
-          error: "Invalid or expired verification code",
-          code: "INVALID_CODE",
-        });
+      return res.status(400).json({
+        error: "Invalid or expired verification code",
+        code: "INVALID_CODE",
+      });
     }
 
     // Mark code as used + verify email
@@ -159,7 +151,39 @@ router.post("/verify", authLimiter, async (req, res) => {
 
     resetFailures(req.ip, "failed_login");
 
-    res.json({ message: "Email verified successfully. You can now log in." });
+    // Auto-login: generate tokens so user goes directly into the app
+    const user = await db.getUserById(userId);
+    const tokens = generateTokenPair(user);
+
+    // Store refresh token
+    const refreshHash = crypto
+      .createHash("sha256")
+      .update(tokens.refreshToken)
+      .digest("hex");
+    await db.storeRefreshToken({
+      id: uuidv4(),
+      user_id: user.id,
+      token_hash: refreshHash,
+      device_id: "signup_verify",
+      ip_address: req.ip,
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    metrics.authAttempts.inc({ action: "verify_login", result: "success" });
+
+    res.json({
+      message: "Email verified successfully.",
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        bio: user.bio || null,
+        avatarSeed: user.avatar_seed,
+      },
+    });
   } catch (err) {
     console.error("Verification error:", err);
     res
@@ -178,12 +202,10 @@ router.post(
       const { email, password, deviceId } = req.body;
 
       if (!email || !password) {
-        return res
-          .status(400)
-          .json({
-            error: "Email and password are required",
-            code: "VALIDATION_ERROR",
-          });
+        return res.status(400).json({
+          error: "Email and password are required",
+          code: "VALIDATION_ERROR",
+        });
       }
 
       const user = await db.getUserByEmail(email.toLowerCase());
@@ -243,6 +265,8 @@ router.post(
           id: user.id,
           name: user.name,
           email: user.email,
+          phone: user.phone,
+          bio: user.bio || null,
           avatarSeed: user.avatar_seed,
         },
       });
@@ -277,12 +301,10 @@ router.post("/refresh", async (req, res) => {
     if (!stored) {
       // Possible token reuse attack — invalidate all tokens for this user
       console.warn(`⚠️  Refresh token reuse detected from IP ${req.ip}`);
-      return res
-        .status(401)
-        .json({
-          error: "Invalid refresh token. Please login again.",
-          code: "INVALID_REFRESH",
-        });
+      return res.status(401).json({
+        error: "Invalid refresh token. Please login again.",
+        code: "INVALID_REFRESH",
+      });
     }
 
     // Delete the used token (single-use rotation)

@@ -50,6 +50,18 @@ router.post("/", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    // ─── Privacy Guard: Private users can only be messaged by friends ────
+    if (targetUser.is_private) {
+      const friends = await db.areFriends(req.user.id, targetUserId);
+      if (!friends) {
+        return res.status(403).json({
+          error:
+            "This user has a private account. Send a friend request first.",
+          code: "PRIVATE_USER",
+        });
+      }
+    }
+
     // Check for existing conversation
     const existingConvId = await db.getConversationBetweenUsers(
       req.user.id,

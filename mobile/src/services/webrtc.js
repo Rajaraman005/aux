@@ -49,6 +49,7 @@ export const CALL_STATES = {
   CONNECTING: "connecting",
   CONNECTED: "connected",
   RECONNECTING: "reconnecting",
+  ENDING: "ending",
   ENDED: "ended",
   FAILED: "failed",
 };
@@ -229,7 +230,9 @@ class WebRTCEngine {
     // ─── ICE Candidate Handling ───────────────────────────────────────
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log(`🧊 Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`);
+        console.log(
+          `🧊 Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`,
+        );
         signalingClient.sendIceCandidate(this.callId, event.candidate);
       } else {
         console.log("🧊 ICE gathering complete");
@@ -425,7 +428,9 @@ class WebRTCEngine {
   // ★ Drain all queued ICE candidates after remoteDescription is set
   async _drainIceCandidateQueue() {
     if (this.iceCandidateQueue.length === 0) return;
-    console.log(`🧊 Draining ${this.iceCandidateQueue.length} queued ICE candidates`);
+    console.log(
+      `🧊 Draining ${this.iceCandidateQueue.length} queued ICE candidates`,
+    );
     while (this.iceCandidateQueue.length > 0) {
       const candidate = this.iceCandidateQueue.shift();
       try {
@@ -722,8 +727,17 @@ class WebRTCEngine {
     return result;
   }
 
-  // ─── Cleanup ───────────────────────────────────────────────────────────────
+  // ─── Cleanup (Idempotent) ──────────────────────────────────────────────────
   cleanup() {
+    // ★ Idempotent guard — prevent re-entrant cleanup
+    if (
+      this._callState === CALL_STATES.IDLE ||
+      this._callState === CALL_STATES.ENDING
+    ) {
+      return;
+    }
+    this._setState(CALL_STATES.ENDING);
+
     // ★ Stop InCallManager
     if (InCallManager) {
       try {

@@ -1,6 +1,11 @@
 /**
- * Chat Screen — 1-on-1 messaging with real-time delivery.
- * Features: message bubbles, typing indicator, optimistic send, read receipts.
+ * ChatScreen — Production-grade 1-on-1 messaging.
+ *
+ * Keyboard model: Translation (not KAV).
+ *   - useReanimatedKeyboardAnimation tracks keyboard height
+ *   - Animated.View translateY moves the entire content area up
+ *   - Zero dependency on windowSoftInputMode
+ *   - Works identically on all Android OEMs and iOS devices
  */
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -13,85 +18,94 @@ import {
   Platform,
   ActivityIndicator,
   Image,
-  Keyboard,
+  StatusBar,
 } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  interpolate,
+} from "react-native-reanimated";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 import { useSignaling } from "../context/SignalingContext";
 import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import signalingClient from "../services/socket";
-import { colors, typography, spacing, radius, shadows } from "../styles/theme";
+import callManager from "../services/CallManager";
+import { colors, typography, spacing, shadows } from "../styles/theme";
+import MessageBubble from "../components/MessageBubble";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
+const NEAR_BOTTOM_THRESHOLD = 150;
+const INPUT_BAR_HEIGHT = 64; // approximate height for FlatList bottom padding
 
 let msgCounter = 0;
 function generateTempId() {
   return `temp_${Date.now()}_${++msgCounter}`;
 }
 
-function formatMessageTime(dateStr) {
-  if (!dateStr) return "";
-  const date = new Date(dateStr);
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 export default function ChatScreen({ route, navigation }) {
   const { conversationId, otherUser } = route.params;
   const { user } = useAuth();
-  const { onlineUsers } = useSignaling();
+  const { onlineUsers, setActiveConversation } = useSignaling();
+  const insets = useSafeAreaInsets();
+
+  // ─── Keyboard animation (translation model) ────────────────────────
+  const { height: kbHeight, progress: kbProgress } =
+    useReanimatedKeyboardAnimation();
+
+  const translateStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: kbHeight.value }],
+  }));
+
+  // Animate bottom padding: insets.bottom when closed → 0 when keyboard open
+  const safeBottom = Math.max(10, insets.bottom);
+  const inputBarAnimStyle = useAnimatedStyle(() => ({
+    paddingBottom: interpolate(kbProgress.value, [0, 1], [safeBottom, 0]),
+  }));
+
+  // ─── State ───────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isTyping, setIsTyping] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // Scroll tracking for "New Messages" badge
+  const [isNearBottom, setIsNearBottom] = useState(true);
+  const [newMessageCount, setNewMessageCount] = useState(0);
+
+  // Refs
   const flatListRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef(0);
+  const isNearBottomRef = useRef(true);
 
   const isOnline = onlineUsers.has(otherUser.id);
 
-  // ─── Keyboard handling (Android fix) ──────────────────────────────────
   useEffect(() => {
-    const showEvent =
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvent =
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    isNearBottomRef.current = isNearBottom;
+  }, [isNearBottom]);
 
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      setKeyboardHeight(e.endCoordinates.height);
-      setTimeout(
-        () => flatListRef.current?.scrollToEnd({ animated: true }),
-        100,
-      );
-    });
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      setKeyboardHeight(0);
-    });
-
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
-
-  // ─── Load message history ──────────────────────────────────────────────
+  // ─── Load message history ──────────────────────────────────────────
   useEffect(() => {
     loadMessages();
-    // Mark as read
     signalingClient.sendMessageRead(conversationId);
     apiClient
       .post(endpoints.conversations.read(conversationId))
       .catch(() => {});
-  }, [conversationId]);
+
+    // Tell SignalingContext we're viewing this conversation (suppresses sounds)
+    setActiveConversation(conversationId);
+    return () => setActiveConversation(null);
+  }, [conversationId, setActiveConversation]);
 
   const loadMessages = async () => {
     try {
       const data = await apiClient.get(
         endpoints.conversations.messages(conversationId),
       );
-      // API returns newest first, we display oldest first
-      setMessages((data.messages || []).reverse());
+      setMessages(data.messages || []);
     } catch (err) {
       console.error("Load messages error:", err);
     } finally {
@@ -99,13 +113,15 @@ export default function ChatScreen({ route, navigation }) {
     }
   };
 
-  // ─── Real-time events ──────────────────────────────────────────────────
+  // ─── Real-time events ──────────────────────────────────────────────
   useEffect(() => {
     const unsubMsg = signalingClient.on("message-received", (data) => {
       if (data.conversationId === conversationId) {
-        setMessages((prev) => [...prev, data.message]);
-        // Mark as read immediately since we're viewing this conversation
+        setMessages((prev) => [data.message, ...prev]);
         signalingClient.sendMessageRead(conversationId);
+        if (!isNearBottomRef.current) {
+          setNewMessageCount((prev) => prev + 1);
+        }
       }
     });
 
@@ -133,7 +149,7 @@ export default function ChatScreen({ route, navigation }) {
     };
   }, [conversationId]);
 
-  // ─── Send message ──────────────────────────────────────────────────────
+  // ─── Send message ──────────────────────────────────────────────────
   const handleSend = useCallback(() => {
     const text = inputText.trim();
     if (!text) return;
@@ -147,214 +163,250 @@ export default function ChatScreen({ route, navigation }) {
       pending: true,
     };
 
-    setMessages((prev) => [...prev, optimisticMsg]);
+    setMessages((prev) => [optimisticMsg, ...prev]);
     signalingClient.sendChatMessage(conversationId, text, tempId);
     setInputText("");
+
+    setTimeout(() => {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }, 100);
   }, [inputText, conversationId, user]);
 
-  // ─── Typing indicator (throttled) ──────────────────────────────────────
-  const handleTextChange = (text) => {
-    setInputText(text);
-    const now = Date.now();
-    if (text.length > 0 && now - lastTypingSentRef.current > 2000) {
-      signalingClient.sendTyping(conversationId);
-      lastTypingSentRef.current = now;
-    }
-  };
+  // ─── Typing indicator (throttled) ──────────────────────────────────
+  const handleTextChange = useCallback(
+    (text) => {
+      setInputText(text);
+      const now = Date.now();
+      if (text.length > 0 && now - lastTypingSentRef.current > 2000) {
+        signalingClient.sendTyping(conversationId);
+        lastTypingSentRef.current = now;
+      }
+    },
+    [conversationId],
+  );
 
-  // ─── Render message bubble ─────────────────────────────────────────────
-  const renderMessage = ({ item }) => {
-    const isMine = item.sender_id === user.id;
-    return (
-      <View
-        style={[
-          styles.bubbleRow,
-          isMine ? styles.bubbleRowRight : styles.bubbleRowLeft,
-        ]}
-      >
-        <View
-          style={[
-            styles.bubble,
-            isMine ? styles.bubbleMine : styles.bubbleTheirs,
-          ]}
-        >
-          <Text
-            style={[
-              styles.bubbleText,
-              isMine ? styles.bubbleTextMine : styles.bubbleTextTheirs,
-            ]}
-          >
-            {item.content}
-          </Text>
-          <View style={styles.bubbleFooter}>
-            <Text style={[styles.bubbleTime, isMine && styles.bubbleTimeMine]}>
-              {formatMessageTime(item.created_at)}
-            </Text>
-            {item.pending && (
-              <Icon
-                name="clock"
-                size={10}
-                color={colors.textMuted}
-                style={{ marginLeft: 4 }}
-              />
-            )}
-          </View>
-        </View>
-      </View>
-    );
-  };
+  // ─── Scroll tracking ──────────────────────────────────────────────
+  const handleScroll = useCallback((event) => {
+    const { contentOffset } = event.nativeEvent;
+    const nearBottom = contentOffset.y <= NEAR_BOTTOM_THRESHOLD;
+    setIsNearBottom(nearBottom);
+    if (nearBottom) {
+      setNewMessageCount(0);
+    }
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    setNewMessageCount(0);
+  }, []);
+
+  // ─── Render ────────────────────────────────────────────────────────
+  const renderMessage = useCallback(
+    ({ item }) => (
+      <MessageBubble item={item} isMine={item.sender_id === user.id} />
+    ),
+    [user.id],
+  );
+
+  const keyExtractor = useCallback((item) => item.id || item.tempId, []);
 
   return (
     <View style={styles.container}>
-      {/* Header */}
+      <StatusBar
+        barStyle="dark-content"
+        backgroundColor={colors.bg}
+        translucent={false}
+      />
+      <View style={[styles.statusBarSpacer, { height: insets.top }]} />
+
+      {/* ─── Header ────────────────────────────────────────────────── */}
       <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => navigation.goBack()}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Icon name="arrow-left" size={24} color={colors.textPrimary} />
-        </TouchableOpacity>
-        <Image
-          source={{
-            uri: `${AVATAR_BASE}${encodeURIComponent(otherUser.name)}`,
-          }}
-          style={styles.headerAvatar}
-        />
-        <View style={styles.headerInfo}>
-          <Text style={styles.headerName}>{otherUser.name}</Text>
-          <Text style={styles.headerStatus}>
-            {isTyping ? "typing..." : isOnline ? "Online" : "Offline"}
-          </Text>
-        </View>
-        <TouchableOpacity
-          style={{ marginLeft: 16 }}
-          onPress={() => {
-            signalingClient.requestCall(otherUser.id);
-            const unsub = signalingClient.on("call-ringing", (data) => {
-              navigation.navigate("Call", {
-                callId: data.callId,
-                callerName: otherUser.name,
-                isCaller: true,
-              });
-              unsub();
-            });
-          }}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Icon name="phone" size={22} color={colors.textPrimary} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={{ marginLeft: 16 }}
-          onPress={() => {
-            signalingClient.requestCall(otherUser.id);
-            const unsub = signalingClient.on("call-ringing", (data) => {
-              navigation.navigate("Call", {
-                callId: data.callId,
-                callerName: otherUser.name,
-                isCaller: true,
-              });
-              unsub();
-            });
-          }}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <Icon name="video" size={22} color={colors.textPrimary} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Messages */}
-      <View
-        style={[
-          { flex: 1 },
-          keyboardHeight > 0 && { paddingBottom: keyboardHeight },
-        ]}
-      >
-        {isLoading ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="large" color={colors.primary} />
-          </View>
-        ) : (
-          <FlatList
-            ref={flatListRef}
-            data={messages}
-            renderItem={renderMessage}
-            keyExtractor={(item) => item.id || item.tempId}
-            contentContainerStyle={styles.messagesList}
-            showsVerticalScrollIndicator={false}
-            onContentSizeChange={() =>
-              flatListRef.current?.scrollToEnd({ animated: false })
-            }
-            ListEmptyComponent={
-              <View style={styles.emptyChat}>
-                <Icon
-                  name="message-circle"
-                  size={48}
-                  color={colors.textMuted}
-                />
-                <Text style={styles.emptyChatText}>
-                  Say hello to {otherUser.name}!
-                </Text>
-              </View>
-            }
+        <View style={styles.headerInner}>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Icon name="arrow-left" size={24} color={colors.textPrimary} />
+          </TouchableOpacity>
+          <Image
+            source={{
+              uri: `${AVATAR_BASE}${encodeURIComponent(
+                otherUser.name || "User",
+              )}`,
+            }}
+            style={styles.headerAvatar}
           />
-        )}
-
-        {/* Typing indicator */}
-        {isTyping && (
-          <View style={styles.typingContainer}>
-            <Text style={styles.typingText}>
-              {otherUser.name.split(" ")[0]} is typing...
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerName}>{otherUser.name}</Text>
+            <Text style={styles.headerStatus}>
+              {isTyping ? "typing..." : isOnline ? "Online" : "Offline"}
             </Text>
           </View>
-        )}
-
-        {/* Input Bar */}
-        <View style={styles.inputBar}>
-          <TextInput
-            style={styles.textInput}
-            value={inputText}
-            onChangeText={handleTextChange}
-            placeholder="Type a message..."
-            placeholderTextColor={colors.textMuted}
-            multiline
-            maxLength={5000}
-          />
           <TouchableOpacity
-            style={[
-              styles.sendButton,
-              !inputText.trim() && styles.sendButtonDisabled,
-            ]}
-            onPress={handleSend}
-            disabled={!inputText.trim()}
+            style={styles.headerAction}
+            onPress={() => {
+              const started = callManager.startCall(
+                otherUser.id,
+                otherUser.name,
+              );
+              if (started) {
+                // Navigate immediately — CallManager manages the state
+                navigation.navigate("Call", {
+                  callerName: otherUser.name,
+                });
+              }
+            }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Icon
-              name="send"
-              size={20}
-              color={inputText.trim() ? colors.textInverse : colors.textMuted}
-            />
+            <Icon name="phone" size={22} color={colors.textPrimary} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.headerAction}
+            onPress={() => {
+              const started = callManager.startCall(
+                otherUser.id,
+                otherUser.name,
+              );
+              if (started) {
+                navigation.navigate("Call", {
+                  callerName: otherUser.name,
+                });
+              }
+            }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Icon name="video" size={22} color={colors.textPrimary} />
           </TouchableOpacity>
         </View>
+      </View>
+
+      {/* ─── Clip container — prevents content overflowing above header */}
+      <View style={styles.contentClip}>
+        <Animated.View style={[styles.flex1, translateStyle]}>
+          {isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color={colors.primary} />
+            </View>
+          ) : (
+            <FlatList
+              ref={flatListRef}
+              data={messages}
+              renderItem={renderMessage}
+              keyExtractor={keyExtractor}
+              inverted
+              style={styles.flex1}
+              contentContainerStyle={[
+                styles.messagesList,
+                { paddingBottom: spacing.md + INPUT_BAR_HEIGHT + safeBottom },
+              ]}
+              showsVerticalScrollIndicator={false}
+              onScroll={handleScroll}
+              scrollEventThrottle={16}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+              windowSize={7}
+              maxToRenderPerBatch={10}
+              initialNumToRender={20}
+              updateCellsBatchingPeriod={50}
+              removeClippedSubviews={Platform.OS === "android"}
+              ListEmptyComponent={
+                <View style={styles.emptyChat}>
+                  <Icon
+                    name="message-circle"
+                    size={48}
+                    color={colors.textMuted}
+                  />
+                  <Text style={styles.emptyChatText}>
+                    Say hello to {otherUser.name}!
+                  </Text>
+                </View>
+              }
+            />
+          )}
+
+          {/* ─── "New Messages ↓" indicator ────────────────────────── */}
+          {newMessageCount > 0 && !isNearBottom && (
+            <TouchableOpacity
+              style={styles.newMessagesBadge}
+              onPress={scrollToBottom}
+              activeOpacity={0.85}
+            >
+              <Icon name="chevron-down" size={16} color={colors.textInverse} />
+              <Text style={styles.newMessagesBadgeText}>
+                {newMessageCount} new message{newMessageCount > 1 ? "s" : ""}
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* ─── Typing indicator ──────────────────────────────────── */}
+          {isTyping && (
+            <View style={styles.typingContainer}>
+              <Text style={styles.typingText}>
+                {otherUser.name.split(" ")[0]} is typing...
+              </Text>
+            </View>
+          )}
+
+          {/* ─── Input Bar (anchored to bottom, moves with keyboard) ─ */}
+          <Animated.View style={[styles.inputBar, inputBarAnimStyle]}>
+            <TextInput
+              style={styles.textInput}
+              value={inputText}
+              onChangeText={handleTextChange}
+              placeholder="Type a message..."
+              placeholderTextColor={colors.textMuted}
+              multiline
+              maxLength={5000}
+            />
+            <TouchableOpacity
+              style={[
+                styles.sendButton,
+                !inputText.trim() && styles.sendButtonDisabled,
+              ]}
+              onPress={handleSend}
+              disabled={!inputText.trim()}
+            >
+              <Icon
+                name="send"
+                size={20}
+                color={inputText.trim() ? colors.textInverse : colors.textMuted}
+              />
+            </TouchableOpacity>
+          </Animated.View>
+        </Animated.View>
       </View>
     </View>
   );
 }
 
+// ─── Styles ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.bg,
   },
+  flex1: {
+    flex: 1,
+  },
+  contentClip: {
+    flex: 1,
+    overflow: "hidden",
+  },
+  statusBarSpacer: {
+    backgroundColor: colors.bg,
+  },
 
   // Header
   header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: spacing.md,
-    paddingTop: 54,
-    paddingBottom: 14,
     backgroundColor: colors.bg,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
+  },
+  headerInner: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.md,
+    paddingVertical: 10,
   },
   headerAvatar: {
     width: 40,
@@ -377,6 +429,9 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 1,
   },
+  headerAction: {
+    marginLeft: 16,
+  },
 
   // Messages
   loadingContainer: {
@@ -386,55 +441,7 @@ const styles = StyleSheet.create({
   },
   messagesList: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    flexGrow: 1,
-    justifyContent: "flex-end",
-  },
-  bubbleRow: {
-    marginBottom: 6,
-  },
-  bubbleRowRight: {
-    alignItems: "flex-end",
-  },
-  bubbleRowLeft: {
-    alignItems: "flex-start",
-  },
-  bubble: {
-    maxWidth: "78%",
-    borderRadius: 18,
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-  },
-  bubbleMine: {
-    backgroundColor: colors.chatBubbleMine,
-    borderBottomRightRadius: 4,
-  },
-  bubbleTheirs: {
-    backgroundColor: colors.chatBubbleTheirs,
-    borderBottomLeftRadius: 4,
-  },
-  bubbleText: {
-    fontSize: 15,
-    lineHeight: 21,
-  },
-  bubbleTextMine: {
-    color: colors.chatBubbleTextMine,
-  },
-  bubbleTextTheirs: {
-    color: colors.chatBubbleTextTheirs,
-  },
-  bubbleFooter: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    marginTop: 4,
-  },
-  bubbleTime: {
-    fontSize: 11,
-    color: colors.textMuted,
-  },
-  bubbleTimeMine: {
-    color: "rgba(255, 255, 255, 0.6)",
+    paddingTop: spacing.md,
   },
 
   // Typing
@@ -453,7 +460,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-end",
     paddingHorizontal: spacing.md,
-    paddingVertical: 10,
+    paddingTop: 10,
     backgroundColor: colors.inputBarBg,
     borderTopWidth: 1,
     borderTopColor: colors.border,
@@ -482,6 +489,26 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bgElevated,
     shadowOpacity: 0,
     elevation: 0,
+  },
+
+  // New Messages badge
+  newMessagesBadge: {
+    position: "absolute",
+    bottom: 70,
+    alignSelf: "center",
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    ...shadows.md,
+  },
+  newMessagesBadgeText: {
+    color: colors.textInverse,
+    fontSize: 13,
+    fontWeight: "600",
+    marginLeft: 4,
   },
 
   // Empty

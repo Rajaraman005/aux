@@ -1,6 +1,11 @@
 /**
  * World Screen — Global public chat visible to all users.
- * Full-screen chat UI with back button. No bottom tab bar.
+ *
+ * Keyboard model: Translation (not KAV).
+ *   - useReanimatedKeyboardAnimation tracks keyboard height
+ *   - Animated.View translateY moves the entire content area up
+ *   - Zero dependency on windowSoftInputMode
+ *   - Works identically on all Android OEMs and iOS devices
  */
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -13,8 +18,14 @@ import {
   Platform,
   ActivityIndicator,
   Image,
-  Keyboard,
+  StatusBar,
 } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  interpolate,
+} from "react-native-reanimated";
+import { useReanimatedKeyboardAnimation } from "react-native-keyboard-controller";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 import apiClient from "../services/api";
@@ -23,6 +34,8 @@ import signalingClient from "../services/socket";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
+const NEAR_BOTTOM_THRESHOLD = 150;
+const INPUT_BAR_HEIGHT = 64;
 
 let msgCounter = 0;
 function generateTempId() {
@@ -44,35 +57,35 @@ function formatTime(dateStr) {
 
 export default function WorldScreen({ navigation }) {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
+
+  // ─── Keyboard animation (translation model) ────────────────────────
+  const { height: kbHeight, progress: kbProgress } =
+    useReanimatedKeyboardAnimation();
+
+  const translateStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: kbHeight.value }],
+  }));
+
+  // Animate bottom padding: insets.bottom when closed → 0 when keyboard open
+  const safeBottom = Math.max(10, insets.bottom);
+  const inputBarAnimStyle = useAnimatedStyle(() => ({
+    paddingBottom: interpolate(kbProgress.value, [0, 1], [safeBottom, 0]),
+  }));
+
+  // ─── State ───────────────────────────────────────────────────────────
   const [messages, setMessages] = useState([]);
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  // Scroll tracking
+  const [isNearBottom, setIsNearBottom] = useState(true);
   const flatListRef = useRef(null);
+  const isNearBottomRef = useRef(true);
 
-  // ─── Keyboard handling (Android fix) ────────────────────────────────
   useEffect(() => {
-    const showEvent =
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
-    const hideEvent =
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
-
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      setKeyboardHeight(e.endCoordinates.height);
-      setTimeout(
-        () => flatListRef.current?.scrollToEnd({ animated: true }),
-        100,
-      );
-    });
-    const hideSub = Keyboard.addListener(hideEvent, () => {
-      setKeyboardHeight(0);
-    });
-
-    return () => {
-      showSub.remove();
-      hideSub.remove();
-    };
-  }, []);
+    isNearBottomRef.current = isNearBottom;
+  }, [isNearBottom]);
 
   // ─── Load history ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -82,7 +95,8 @@ export default function WorldScreen({ navigation }) {
   const loadMessages = async () => {
     try {
       const data = await apiClient.get(endpoints.world);
-      setMessages(data.messages || []);
+      const msgs = data.messages || [];
+      setMessages(msgs.reverse());
     } catch (err) {
       console.error("World chat load error:", err);
     } finally {
@@ -95,7 +109,7 @@ export default function WorldScreen({ navigation }) {
     const unsubReceived = signalingClient.on(
       "world-message-received",
       (data) => {
-        setMessages((prev) => [...prev, data.message]);
+        setMessages((prev) => [data.message, ...prev]);
       },
     );
 
@@ -132,70 +146,92 @@ export default function WorldScreen({ navigation }) {
       pending: true,
     };
 
-    setMessages((prev) => [...prev, optimistic]);
+    setMessages((prev) => [optimistic, ...prev]);
     signalingClient.sendWorldMessage(text, tempId);
     setInputText("");
+
+    setTimeout(() => {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    }, 100);
   }, [inputText, user]);
 
+  // ─── Scroll tracking ──────────────────────────────────────────────────
+  const handleScroll = useCallback((event) => {
+    const { contentOffset } = event.nativeEvent;
+    const nearBottom = contentOffset.y <= NEAR_BOTTOM_THRESHOLD;
+    setIsNearBottom(nearBottom);
+  }, []);
+
   // ─── Render message ────────────────────────────────────────────────────
-  const renderMessage = ({ item, index }) => {
-    const isMine = item.sender_id === user.id;
-    const prevItem = index > 0 ? messages[index - 1] : null;
-    const showAvatar = !prevItem || prevItem.sender_id !== item.sender_id;
+  const renderMessage = useCallback(
+    ({ item, index }) => {
+      const isMine = item.sender_id === user.id;
+      const prevItem = index < messages.length - 1 ? messages[index + 1] : null;
+      const showAvatar = !prevItem || prevItem.sender_id !== item.sender_id;
 
-    return (
-      <View
-        style={[
-          styles.messageRow,
-          isMine ? styles.messageRowMine : styles.messageRowTheirs,
-        ]}
-      >
-        {/* Avatar — shown only on first message in a group, for others only */}
-        {!isMine && (
-          <View style={styles.avatarCol}>
-            {showAvatar ? (
-              <Image
-                source={{
-                  uri: `${AVATAR_BASE}${encodeURIComponent(item.sender_name)}`,
-                }}
-                style={styles.avatar}
-              />
-            ) : (
-              <View style={styles.avatarPlaceholder} />
-            )}
-          </View>
-        )}
-
-        <View style={[styles.bubbleCol, isMine && styles.bubbleColMine]}>
-          {showAvatar && !isMine && (
-            <Text style={styles.senderName}>{item.sender_name}</Text>
+      return (
+        <View
+          style={[
+            styles.messageRow,
+            isMine ? styles.messageRowMine : styles.messageRowTheirs,
+          ]}
+        >
+          {!isMine && (
+            <View style={styles.avatarCol}>
+              {showAvatar ? (
+                <Image
+                  source={{
+                    uri: `${AVATAR_BASE}${encodeURIComponent(item.sender_name)}`,
+                  }}
+                  style={styles.avatar}
+                />
+              ) : (
+                <View style={styles.avatarPlaceholder} />
+              )}
+            </View>
           )}
-          <View
-            style={[
-              styles.bubble,
-              isMine ? styles.bubbleMine : styles.bubbleTheirs,
-            ]}
-          >
-            <Text
+
+          <View style={[styles.bubbleCol, isMine && styles.bubbleColMine]}>
+            {showAvatar && !isMine && (
+              <Text style={styles.senderName}>{item.sender_name}</Text>
+            )}
+            <View
               style={[
-                styles.bubbleText,
-                isMine ? styles.bubbleTextMine : styles.bubbleTextTheirs,
+                styles.bubble,
+                isMine ? styles.bubbleMine : styles.bubbleTheirs,
               ]}
             >
-              {item.content}
+              <Text
+                style={[
+                  styles.bubbleText,
+                  isMine ? styles.bubbleTextMine : styles.bubbleTextTheirs,
+                ]}
+              >
+                {item.content}
+              </Text>
+            </View>
+            <Text style={[styles.timeText, isMine && styles.timeTextMine]}>
+              {item.pending ? "sending..." : formatTime(item.created_at)}
             </Text>
           </View>
-          <Text style={[styles.timeText, isMine && styles.timeTextMine]}>
-            {item.pending ? "sending..." : formatTime(item.created_at)}
-          </Text>
         </View>
-      </View>
-    );
-  };
+      );
+    },
+    [messages, user.id],
+  );
+
+  const keyExtractor = useCallback((item) => item.id || item.tempId, []);
 
   return (
     <View style={styles.container}>
-      {/* Header — with back button */}
+      <StatusBar
+        barStyle="dark-content"
+        backgroundColor={colors.bg}
+        translucent={false}
+      />
+      <View style={[styles.statusBarSpacer, { height: insets.top }]} />
+
+      {/* ─── Header ────────────────────────────────────────────────── */}
       <View style={styles.header}>
         <View style={styles.headerRow}>
           <TouchableOpacity
@@ -212,12 +248,9 @@ export default function WorldScreen({ navigation }) {
         </View>
       </View>
 
-      <View
-        style={[
-          { flex: 1 },
-          keyboardHeight > 0 && { paddingBottom: keyboardHeight },
-        ]}
-      >
+      {/* ─── Clip container — prevents content overflowing above header */}
+      <View style={styles.contentClip}>
+        <Animated.View style={[styles.flex1, translateStyle]}>
         {isLoading ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color={colors.primary} />
@@ -227,12 +260,23 @@ export default function WorldScreen({ navigation }) {
             ref={flatListRef}
             data={messages}
             renderItem={renderMessage}
-            keyExtractor={(item) => item.id || item.tempId}
-            contentContainerStyle={styles.messagesList}
+            keyExtractor={keyExtractor}
+            inverted
+            style={styles.flex1}
+            contentContainerStyle={[
+              styles.messagesList,
+              { paddingBottom: spacing.md + INPUT_BAR_HEIGHT + safeBottom },
+            ]}
             showsVerticalScrollIndicator={false}
-            onContentSizeChange={() =>
-              flatListRef.current?.scrollToEnd({ animated: true })
-            }
+            onScroll={handleScroll}
+            scrollEventThrottle={16}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            windowSize={7}
+            maxToRenderPerBatch={10}
+            initialNumToRender={20}
+            updateCellsBatchingPeriod={50}
+            removeClippedSubviews={Platform.OS === "android"}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <View style={styles.emptyIconCircle}>
@@ -247,8 +291,13 @@ export default function WorldScreen({ navigation }) {
           />
         )}
 
-        {/* Input Bar */}
-        <View style={styles.inputBar}>
+        {/* ─── Input Bar (moves with keyboard via translateY) ──── */}
+        <Animated.View
+          style={[
+            styles.inputBar,
+            inputBarAnimStyle,
+          ]}
+        >
           <TextInput
             style={styles.textInput}
             value={inputText}
@@ -272,7 +321,8 @@ export default function WorldScreen({ navigation }) {
               color={inputText.trim() ? colors.textInverse : colors.textMuted}
             />
           </TouchableOpacity>
-        </View>
+        </Animated.View>
+        </Animated.View>
       </View>
     </View>
   );
@@ -283,11 +333,20 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
+  flex1: {
+    flex: 1,
+  },
+  contentClip: {
+    flex: 1,
+    overflow: "hidden",
+  },
+  statusBarSpacer: {
+    backgroundColor: colors.bg,
+  },
 
   // Header
   header: {
     paddingHorizontal: spacing.md,
-    paddingTop: 50,
     paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
@@ -296,6 +355,7 @@ const styles = StyleSheet.create({
   headerRow: {
     flexDirection: "row",
     alignItems: "center",
+    paddingVertical: 10,
   },
   backButton: {
     padding: 4,
@@ -324,8 +384,7 @@ const styles = StyleSheet.create({
   },
   messagesList: {
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.md,
-    flexGrow: 1,
+    paddingTop: spacing.md,
   },
   messageRow: {
     flexDirection: "row",
@@ -433,7 +492,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "flex-end",
     paddingHorizontal: spacing.md,
-    paddingVertical: 10,
+    paddingTop: 10,
     backgroundColor: colors.inputBarBg,
     borderTopWidth: 1,
     borderTopColor: colors.border,

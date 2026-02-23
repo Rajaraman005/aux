@@ -3,7 +3,7 @@
  * Navigation: Auth stack (Splash/Login/Signup/Verify) → Main tabs + stack.
  * Wraps in AuthProvider + SignalingProvider for global state.
  */
-import React, { useRef } from "react";
+import React, { useRef, useState, useEffect, useCallback } from "react";
 import {
   NavigationContainer,
   createNavigationContainerRef,
@@ -18,8 +18,13 @@ import {
   TouchableOpacity,
   Modal,
   Text,
+  Image,
 } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import {
+  SafeAreaProvider,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import Icon from "react-native-vector-icons/Feather";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
 import {
@@ -27,6 +32,11 @@ import {
   useSignaling,
 } from "./src/context/SignalingContext";
 import signalingClient from "./src/services/socket";
+import callManager from "./src/services/CallManager";
+import {
+  initializeNotifications,
+  cleanupNotifications,
+} from "./src/services/notifications";
 import { colors, typography, shadows, spacing } from "./src/styles/theme";
 
 // Screens
@@ -34,13 +44,16 @@ import LoginScreen from "./src/screens/LoginScreen";
 import SignupScreen from "./src/screens/SignupScreen";
 import VerifyScreen from "./src/screens/VerifyScreen";
 import HomeScreen from "./src/screens/HomeScreen";
+// import FeedScreen from "./src/screens/FeedScreen";
 import CallScreen from "./src/screens/CallScreen";
 import SplashScreen from "./src/screens/SplashScreen";
 import ChatScreen from "./src/screens/ChatScreen";
 import SearchScreen from "./src/screens/SearchScreen";
-import CallsScreen from "./src/screens/CallsScreen";
+import RequestsScreen from "./src/screens/RequestsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import WorldScreen from "./src/screens/WorldScreen";
+import ProfileScreen from "./src/screens/ProfileScreen";
+import NotificationsScreen from "./src/screens/NotificationsScreen";
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -69,6 +82,35 @@ function AuthStack() {
 
 // ─── Bottom Tab Navigator ────────────────────────────────────────────────────
 function MainTabs() {
+  const insets = useSafeAreaInsets();
+  const bottomPad = Math.max(insets.bottom, 10);
+
+  // Badge count for pending friend requests
+  const [requestCount, setRequestCount] = useState(0);
+
+  const fetchRequestCount = useCallback(async () => {
+    try {
+      const apiClient = require("./src/services/api").default;
+      const { endpoints } = require("./src/config/api");
+      const data = await apiClient.get(endpoints.friends.requests);
+      setRequestCount((data.requests || []).length);
+    } catch (err) {
+      // Non-critical
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRequestCount();
+
+    // Real-time: refresh count when a new notification arrives
+    const unsub = signalingClient.on("notification:new", (data) => {
+      if (data?.notification?.type === "friend_request") {
+        setRequestCount((prev) => prev + 1);
+      }
+    });
+    return () => unsub();
+  }, [fetchRequestCount]);
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -77,8 +119,8 @@ function MainTabs() {
           backgroundColor: colors.tabBarBg,
           borderTopColor: colors.border,
           borderTopWidth: 1,
-          height: 80,
-          paddingBottom: 20,
+          height: 60 + bottomPad,
+          paddingBottom: bottomPad,
           paddingTop: 8,
         },
         tabBarActiveTintColor: colors.primary,
@@ -119,7 +161,7 @@ function MainTabs() {
           tabBarLabel: "",
           tabBarIcon: () => (
             <View style={styles.fabButton}>
-              <Icon name="plus" size={28} color={colors.textInverse} />
+              <Icon name="plus" size={26} color="#fff" />
             </View>
           ),
         }}
@@ -131,12 +173,28 @@ function MainTabs() {
         })}
       />
       <Tab.Screen
-        name="Calls"
-        component={CallsScreen}
+        name="Requests"
+        component={RequestsScreen}
         options={{
+          tabBarLabel: "Requests",
           tabBarIcon: ({ color, size }) => (
-            <Icon name="phone" size={size} color={color} />
+            <Icon name="user-plus" size={size} color={color} />
           ),
+          tabBarBadge: requestCount > 0 ? requestCount : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: "#ef4444",
+            color: "#fff",
+            fontSize: 10,
+            fontWeight: "700",
+            minWidth: 16,
+            height: 16,
+            lineHeight: 16,
+            borderRadius: 8,
+            top: -2,
+          },
+        }}
+        listeners={{
+          tabPress: () => setRequestCount(0),
         }}
       />
       <Tab.Screen
@@ -192,63 +250,90 @@ function MainStack({ navigationRef }) {
             presentation: "fullScreenModal",
           }}
         />
+        <Stack.Screen
+          name="Profile"
+          component={ProfileScreen}
+          options={{ animation: "slide_from_right" }}
+        />
+        <Stack.Screen
+          name="Notifications"
+          component={NotificationsScreen}
+          options={{ animation: "slide_from_right" }}
+        />
       </Stack.Navigator>
     </SignalingProvider>
   );
 }
 
 // ─── Incoming Call Overlay (visible on any tab) ──────────────────────────────
+const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
+
 function IncomingCallOverlay({ navigationRef }) {
   const { incomingCall, clearIncomingCall } = useSignaling();
 
   const handleAccept = () => {
     if (!incomingCall) return;
-    signalingClient.acceptCall(incomingCall.callId);
+    // ★ Delegate to CallManager — sets up session, signaling listeners, WebRTC
+    callManager.acceptIncomingCall(incomingCall);
     clearIncomingCall();
     if (navigationRef?.current) {
       navigationRef.current.navigate("Call", {
-        callId: incomingCall.callId,
         callerName: incomingCall.callerName,
-        isCaller: false,
       });
     }
   };
 
   const handleReject = () => {
     if (!incomingCall) return;
-    signalingClient.rejectCall(incomingCall.callId);
+    // ★ Delegate to CallManager for proper rejection
+    callManager.rejectIncomingCall(incomingCall.callId);
     clearIncomingCall();
   };
 
   if (!incomingCall) return null;
 
+  const avatarUri = `${AVATAR_BASE}${encodeURIComponent(
+    incomingCall.callerName || "User",
+  )}`;
+
   return (
     <Modal visible transparent animationType="slide">
       <View style={styles.incomingCallOverlay}>
-        <View style={styles.incomingCallCard}>
-          <Icon
-            name="phone-incoming"
-            size={48}
-            color={colors.success}
-            style={{ marginBottom: spacing.md }}
-          />
-          <Text style={styles.incomingCallTitle}>Incoming Call</Text>
+        <StatusBar barStyle="dark-content" />
+
+        {/* Center content: avatar + name */}
+        <View style={styles.incomingCenterContent}>
+          <View style={styles.avatarRing}>
+            <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+          </View>
+          <Text style={styles.incomingCallLabel}>Incoming Call</Text>
           <Text style={styles.incomingCallerName}>
             {incomingCall.callerName}
           </Text>
-          <View style={styles.incomingCallActions}>
-            <TouchableOpacity
-              style={styles.rejectButton}
-              onPress={handleReject}
-            >
-              <Icon name="x" size={28} color="#fff" />
-            </TouchableOpacity>
+        </View>
+
+        {/* Bottom action buttons */}
+        <View style={styles.incomingCallActions}>
+          <View style={styles.actionBtnWrap}>
             <TouchableOpacity
               style={styles.acceptButton}
               onPress={handleAccept}
+              activeOpacity={0.8}
             >
-              <Icon name="phone" size={28} color="#fff" />
+              <Icon name="phone" size={32} color="#fff" />
             </TouchableOpacity>
+            <Text style={styles.actionLabel}>Accept</Text>
+          </View>
+
+          <View style={styles.actionBtnWrap}>
+            <TouchableOpacity
+              style={styles.rejectButton}
+              onPress={handleReject}
+              activeOpacity={0.8}
+            >
+              <Icon name="x" size={32} color="#fff" />
+            </TouchableOpacity>
+            <Text style={styles.actionLabel}>Decline</Text>
           </View>
         </View>
       </View>
@@ -270,11 +355,23 @@ function RootNavigator() {
   const { isAuthenticated, isLoading } = useAuth();
   const navigationRef = useRef(null);
 
+  // Initialize push notification listeners
+  React.useEffect(() => {
+    if (isAuthenticated) {
+      initializeNotifications(navigationRef);
+    }
+    return () => cleanupNotifications();
+  }, [isAuthenticated]);
+
   if (isLoading) return <LoadingScreen />;
 
   return (
     <>
-      <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
+      <StatusBar
+        barStyle="dark-content"
+        backgroundColor={colors.bg}
+        translucent={false}
+      />
       <NavigationContainer
         ref={navigationRef}
         theme={{
@@ -309,9 +406,11 @@ function RootNavigator() {
 export default function App() {
   return (
     <SafeAreaProvider>
-      <AuthProvider>
-        <RootNavigator />
-      </AuthProvider>
+      <KeyboardProvider>
+        <AuthProvider>
+          <RootNavigator />
+        </AuthProvider>
+      </KeyboardProvider>
     </SafeAreaProvider>
   );
 }
@@ -323,61 +422,92 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: colors.bg,
   },
-  fabButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: colors.primary,
-    justifyContent: "center",
-    alignItems: "center",
-    marginBottom: 20,
-    ...shadows.md,
-  },
-  // Incoming Call
+
+  // Incoming Call Overlay
   incomingCallOverlay: {
+    flex: 1,
+    backgroundColor: "#f5f5f5",
+    paddingTop: 60,
+    paddingBottom: 50,
+    alignItems: "center",
+  },
+  incomingCenterContent: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: colors.overlay,
   },
-  incomingCallCard: {
-    width: "80%",
-    backgroundColor: colors.bg,
-    borderRadius: 24,
-    padding: 32,
+  avatarRing: {
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    borderWidth: 3,
+    borderColor: "#d0d0d0",
+    justifyContent: "center",
     alignItems: "center",
-    ...shadows.xl,
+    marginBottom: 20,
   },
-  incomingCallTitle: {
-    fontSize: 13,
-    fontWeight: "600",
-    letterSpacing: 0.8,
-    textTransform: "uppercase",
-    color: colors.textMuted,
-    marginBottom: spacing.sm,
+  avatarImage: {
+    width: 118,
+    height: 118,
+    borderRadius: 59,
+    backgroundColor: "#e0e0e0",
+  },
+  incomingCallLabel: {
+    fontSize: 14,
+    color: "#888",
+    letterSpacing: 0.3,
+    marginBottom: 8,
   },
   incomingCallerName: {
-    ...typography.h2,
-    marginBottom: spacing.xl,
+    fontSize: 26,
+    fontWeight: "700",
+    color: "#1a1a1a",
   },
   incomingCallActions: {
     flexDirection: "row",
-    gap: 40,
-  },
-  rejectButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.error,
     justifyContent: "center",
+    width: "100%",
+    gap: 150,
+    paddingBottom: 20,
+  },
+  actionBtnWrap: {
     alignItems: "center",
   },
   acceptButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: colors.success,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: "#1a1a1a",
     justifyContent: "center",
     alignItems: "center",
+    marginBottom: 8,
+  },
+  rejectButton: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    backgroundColor: "#e53935",
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+  actionLabel: {
+    fontSize: 13,
+    color: "#666",
+    fontWeight: "500",
+  },
+  fabButton: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#1a1a1a",
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 16,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
   },
 });

@@ -1,8 +1,10 @@
 /**
  * CallScreen — FAANG-Grade Premium UI.
  *
- * Features:
- * ★ Call State Machine integration (CALLING→RINGING→CONNECTING→CONNECTED→RECONNECTING→ENDED→FAILED)
+ * ★ Pure UI Subscriber — all state driven by CallManager.
+ * ★ NO direct signaling listeners — CallManager owns the call lifecycle.
+ * ★ NO stale closures — state updates via event subscription.
+ * ★ Navigation driven by state transitions (ENDED → goBack).
  * ★ Glassmorphic frosted control bar
  * ★ Voice-reactive waveform animations
  * ★ Animated PiP with glow border
@@ -16,6 +18,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   StyleSheet,
   Animated,
   Dimensions,
@@ -25,10 +28,10 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
-import webrtcEngine, { CALL_STATES } from "../services/webrtc";
-import signalingClient from "../services/socket";
+import callManager, { CALL_MANAGER_STATES } from "../services/CallManager";
 import networkMonitor, { QUALITY_TIERS } from "../services/networkMonitor";
 import audioEngine from "../services/audioEngine";
+import Icon from "react-native-vector-icons/Feather";
 
 // ─── Conditional WebRTC Import ───────────────────────────────────────────────
 let RTCView = null;
@@ -88,14 +91,14 @@ const QUALITY_BARS = {
 };
 
 export default function CallScreen({ route, navigation }) {
-  const { callId, callerName, isCaller } = route.params;
+  const { callerName } = route.params;
   const insets = useSafeAreaInsets();
 
-  // ─── State ──────────────────────────────────────────────────────────────────
+  // ─── State (all driven by CallManager events) ──────────────────────────────
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [callState, setCallState] = useState(
-    isCaller ? CALL_STATES.CALLING : CALL_STATES.CONNECTING,
+    callManager.state || CALL_MANAGER_STATES.CALLING,
   );
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
@@ -104,9 +107,7 @@ export default function CallScreen({ route, navigation }) {
   const [qualityTier, setQualityTier] = useState(QUALITY_TIERS.EXCELLENT);
   const [stats, setStats] = useState(null);
   const [showStats, setShowStats] = useState(false);
-
-  const durationTimer = useRef(null);
-  const cleanupRefs = useRef({});
+  const [controlsVisible, setControlsVisible] = useState(true);
 
   // ─── Animations ─────────────────────────────────────────────────────────────
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -122,20 +123,17 @@ export default function CallScreen({ route, navigation }) {
     () => useRef(new Animated.Value(0.3)).current,
   );
   const glowAnim = useRef(new Animated.Value(0)).current;
+  const overlayAnim = useRef(new Animated.Value(1)).current;
   const ringAnims = [
     useRef(new Animated.Value(0)).current,
     useRef(new Animated.Value(0)).current,
     useRef(new Animated.Value(0)).current,
   ];
 
-  // ─── Initialize ─────────────────────────────────────────────────────────────
+  // ─── Subscribe to CallManager (Single Source of Truth) ──────────────────────
   useEffect(() => {
-    if (!WEBRTC_AVAILABLE) {
-      setCallState(CALL_STATES.FAILED);
-      return;
-    }
-
-    // Entrance animation
+    // ★ ALWAYS run entrance animation — even if WebRTC is unavailable
+    //   (otherwise fadeAnim stays at 0 → screen invisible)
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
@@ -150,147 +148,96 @@ export default function CallScreen({ route, navigation }) {
       }),
     ]).start();
 
-    // ★ State Machine callback
-    webrtcEngine.onCallStateChange = (newState, prevState) => {
-      setCallState(newState);
+    // ★ ALWAYS subscribe to CallManager state changes — even without WebRTC
+    //   the signaling lifecycle (ringing → rejected → ended) still works and
+    //   we need to react to it for proper navigation.
+    const unsubState = callManager.on("stateChange", ({ state, prevState }) => {
+      setCallState(state);
 
-      if (newState === CALL_STATES.CONNECTED) {
+      // Haptic feedback on state transitions
+      if (state === CALL_MANAGER_STATES.CONNECTED) {
         haptic("success");
-      } else if (newState === CALL_STATES.RECONNECTING) {
+      } else if (state === CALL_MANAGER_STATES.RECONNECTING) {
         haptic("heavy");
-      } else if (newState === CALL_STATES.FAILED) {
+      } else if (state === CALL_MANAGER_STATES.FAILED) {
         haptic("error");
-        // Auto-exit after showing failed state briefly
-        setTimeout(() => handleCallEnd("failed"), 2000);
+      } else if (state === CALL_MANAGER_STATES.ENDING) {
+        haptic("heavy");
       }
-    };
 
-    webrtcEngine.onLocalStream = (stream) => setLocalStream(stream);
-    webrtcEngine.onRemoteStream = (stream) => {
+      // ★ Navigation driven by state: when ENDED → navigate back
+      if (state === CALL_MANAGER_STATES.ENDED) {
+        // Brief delay so UI shows "Call Ended"
+        setTimeout(() => {
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          }
+        }, 1200);
+      }
+    });
+
+    // ★ Subscribe to media streams
+    const unsubLocal = callManager.on("localStream", (stream) => {
+      setLocalStream(stream);
+    });
+
+    const unsubRemote = callManager.on("remoteStream", (stream) => {
       setRemoteStream(stream);
       haptic("light");
-    };
+    });
 
-    webrtcEngine.onModeSwitch = (mode) => {
+    // ★ Subscribe to mode switches
+    const unsubMode = callManager.on("modeSwitch", ({ mode }) => {
       setIsAudioOnly(mode === "audio_only");
       haptic("medium");
-    };
+    });
 
-    networkMonitor.onQualityChange = (newTier) => {
+    // ★ Subscribe to quality changes
+    const unsubQuality = callManager.on("qualityChange", (newTier) => {
       setQualityTier(newTier);
-      // ★ Update audio-only from quality tier as well
       if (newTier.name === "audio_only" || newTier.name === "critical") {
         setIsAudioOnly(true);
-      } else if (webrtcEngine.isAudioOnly === false) {
-        setIsAudioOnly(false);
-      }
-    };
-    networkMonitor.onStatsUpdate = (data) => setStats(data);
-
-    // ─── Signaling Listeners (register BEFORE init so we don't miss messages) ─
-    const unsubOffer = signalingClient.on("offer", async (msg) => {
-      if (msg.callId === callId) {
-        await webrtcEngine.handleOffer(msg.sdp);
-      }
-    });
-    const unsubAnswer = signalingClient.on("answer", async (msg) => {
-      if (msg.callId === callId) {
-        await webrtcEngine.handleAnswer(msg.sdp);
-      }
-    });
-    const unsubIce = signalingClient.on("ice-candidate", async (msg) => {
-      if (msg.callId === callId) {
-        await webrtcEngine.handleIceCandidate(msg.candidate);
-      }
-    });
-    const unsubIceRestart = signalingClient.on("ice-restart", async (msg) => {
-      if (msg.callId === callId) {
-        await webrtcEngine.handleOffer(msg.sdp);
-      }
-    });
-    // ★ Server sends "call-ended" (not "hang-up") when remote peer hangs up
-    const unsubCallEnded = signalingClient.on("call-ended", (msg) => {
-      if (msg.callId === callId) {
-        handleCallEnd("remote_hangup");
-      }
-    });
-    const unsubHangUp = signalingClient.on("hang-up", (msg) => {
-      if (msg.callId === callId) {
-        handleCallEnd("remote_hangup");
-      }
-    });
-    const unsubRejected = signalingClient.on("call-rejected", (msg) => {
-      if (msg.callId === callId) {
-        handleCallEnd("rejected");
       }
     });
 
-    // ─── Initialize Call ──────────────────────────────────────────────
-    if (isCaller) {
-      // ★ Caller: wait for callee to accept, THEN init WebRTC and create offer
-      const unsubAccepted = signalingClient.on("call-accepted", async (msg) => {
-        if (msg.callId === callId) {
-          unsubAccepted();
-          try {
-            await webrtcEngine.initialize(callId, true);
-            networkMonitor.start(callId);
-            await webrtcEngine.createOffer();
-          } catch (err) {
-            console.error("Call init error:", err);
-            setCallState(CALL_STATES.FAILED);
-            haptic("error");
-          }
-        }
-      });
-      // Store for cleanup
-      cleanupRefs.current.unsubAccepted = unsubAccepted;
-    } else {
-      // ★ Callee: init WebRTC immediately (offer will arrive via signaling)
-      const initCallee = async () => {
-        try {
-          await webrtcEngine.initialize(callId, false);
-          networkMonitor.start(callId);
-        } catch (err) {
-          console.error("Call init error:", err);
-          setCallState(CALL_STATES.FAILED);
-          haptic("error");
-        }
-      };
-      initCallee();
+    // ★ Subscribe to stats
+    const unsubStats = callManager.on("statsUpdate", (data) => {
+      setStats(data);
+    });
+
+    // ★ Subscribe to duration ticks
+    const unsubDuration = callManager.on("durationTick", (seconds) => {
+      setDuration(seconds);
+    });
+
+    // ★ If WebRTC unavailable, mark failed AFTER subscriptions are in place
+    //   so the CallManager's ENDED transition can still navigate us back.
+    if (!WEBRTC_AVAILABLE) {
+      setCallState(CALL_MANAGER_STATES.FAILED);
     }
 
     return () => {
-      unsubOffer?.();
-      unsubAnswer?.();
-      unsubIce?.();
-      unsubIceRestart?.();
-      unsubCallEnded?.();
-      unsubHangUp?.();
-      unsubRejected?.();
-      cleanupRefs.current.unsubAccepted?.();
+      unsubState();
+      unsubLocal();
+      unsubRemote();
+      unsubMode();
+      unsubQuality();
+      unsubStats();
+      unsubDuration();
     };
-  }, [callId]);
+  }, []);
 
   // ─── Duration Timer ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (callState === CALL_STATES.CONNECTED) {
-      durationTimer.current = setInterval(
-        () => setDuration((d) => d + 1),
-        1000,
-      );
-    }
-    return () => {
-      if (durationTimer.current) clearInterval(durationTimer.current);
-    };
-  }, [callState]);
+  // Duration is now handled by CallManager and subscribed via 'durationTick' event.
+  // This useEffect is no longer needed.
 
   // ─── Connecting Dot Animation ───────────────────────────────────────────────
   useEffect(() => {
     if (
-      callState === CALL_STATES.CALLING ||
-      callState === CALL_STATES.CONNECTING ||
-      callState === CALL_STATES.RINGING ||
-      callState === CALL_STATES.RECONNECTING
+      callState === CALL_MANAGER_STATES.CALLING ||
+      callState === CALL_MANAGER_STATES.CONNECTING ||
+      callState === CALL_MANAGER_STATES.RINGING ||
+      callState === CALL_MANAGER_STATES.RECONNECTING
     ) {
       const anims = dotAnims.map((dot, i) =>
         Animated.loop(
@@ -336,7 +283,7 @@ export default function CallScreen({ route, navigation }) {
 
   // ─── PiP Glow Animation ────────────────────────────────────────────────────
   useEffect(() => {
-    if (localStream && callState === CALL_STATES.CONNECTED) {
+    if (localStream && callState === CALL_MANAGER_STATES.CONNECTED) {
       const glow = Animated.loop(
         Animated.sequence([
           Animated.timing(glowAnim, {
@@ -358,7 +305,7 @@ export default function CallScreen({ route, navigation }) {
 
   // ─── Audio-Only Waveform Animation ──────────────────────────────────────────
   useEffect(() => {
-    if (isAudioOnly && callState === CALL_STATES.CONNECTED) {
+    if (isAudioOnly && callState === CALL_MANAGER_STATES.CONNECTED) {
       audioEngine.startMonitoring(remoteStream);
 
       const waveAnimations = waveAnims.map((anim, i) =>
@@ -410,37 +357,39 @@ export default function CallScreen({ route, navigation }) {
     }
   }, [isAudioOnly, callState, remoteStream]);
 
-  // ─── Call End Handler ───────────────────────────────────────────────────────
-  const handleCallEnd = useCallback(
-    (reason = "user_hangup") => {
-      haptic("heavy");
-      signalingClient.hangUp(callId);
-      webrtcEngine.cleanup();
-      networkMonitor.stop();
-      audioEngine.stop();
-      if (durationTimer.current) clearInterval(durationTimer.current);
-      navigation.goBack();
-    },
-    [callId, navigation],
-  );
+  // ─── End Call Handler (delegates to CallManager) ────────────────────────────
+  const handleCallEnd = useCallback(() => {
+    callManager.endCall("user_hangup");
+  }, []);
 
   // ─── Controls ───────────────────────────────────────────────────────────────
   const toggleMute = () => {
     haptic("light");
-    const muted = webrtcEngine.toggleMute();
+    const muted = callManager.toggleMute();
     setIsMuted(muted);
   };
 
   const toggleCamera = () => {
     haptic("light");
-    const off = webrtcEngine.toggleCamera();
+    const off = callManager.toggleCamera();
     setIsCameraOff(off);
   };
 
   const switchCamera = () => {
     haptic("light");
-    webrtcEngine.switchCamera();
+    callManager.switchCamera();
   };
+
+  // ─── Toggle Controls Visibility ─────────────────────────────────────────────
+  const toggleControls = useCallback(() => {
+    const toValue = controlsVisible ? 0 : 1;
+    setControlsVisible(!controlsVisible);
+    Animated.timing(overlayAnim, {
+      toValue,
+      duration: 250,
+      useNativeDriver: true,
+    }).start();
+  }, [controlsVisible, overlayAnim]);
 
   // ─── Formatters ─────────────────────────────────────────────────────────────
   const formatDuration = (s) => {
@@ -451,29 +400,30 @@ export default function CallScreen({ route, navigation }) {
 
   const getStatusText = () => {
     switch (callState) {
-      case CALL_STATES.CALLING:
+      case CALL_MANAGER_STATES.CALLING:
         return "Calling...";
-      case CALL_STATES.RINGING:
+      case CALL_MANAGER_STATES.RINGING:
         return "Ringing...";
-      case CALL_STATES.CONNECTING:
+      case CALL_MANAGER_STATES.CONNECTING:
         return "Connecting...";
-      case CALL_STATES.RECONNECTING:
+      case CALL_MANAGER_STATES.RECONNECTING:
         return "Reconnecting...";
-      case CALL_STATES.FAILED:
+      case CALL_MANAGER_STATES.FAILED:
         return "Call Failed";
-      case CALL_STATES.ENDED:
+      case CALL_MANAGER_STATES.ENDED:
+      case CALL_MANAGER_STATES.ENDING:
         return "Call Ended";
-      case CALL_STATES.CONNECTED:
+      case CALL_MANAGER_STATES.CONNECTED:
         return formatDuration(duration);
       default:
         return "";
     }
   };
 
-  const isConnected = callState === CALL_STATES.CONNECTED;
+  const isConnected = callState === CALL_MANAGER_STATES.CONNECTED;
   const isLive =
-    callState === CALL_STATES.CONNECTED ||
-    callState === CALL_STATES.RECONNECTING;
+    callState === CALL_MANAGER_STATES.CONNECTED ||
+    callState === CALL_MANAGER_STATES.RECONNECTING;
 
   // ─── Render: Quality Bars ──────────────────────────────────────────────────
   const renderQualityBars = () => {
@@ -573,7 +523,7 @@ export default function CallScreen({ route, navigation }) {
                   },
                 ],
               },
-              callState === CALL_STATES.RECONNECTING && {
+              callState === CALL_MANAGER_STATES.RECONNECTING && {
                 backgroundColor: colors.warning,
               },
             ]}
@@ -581,7 +531,7 @@ export default function CallScreen({ route, navigation }) {
         ))}
       </View>
       <Text style={styles.statusLabel}>{getStatusText()}</Text>
-      {callState === CALL_STATES.RECONNECTING && (
+      {callState === CALL_MANAGER_STATES.RECONNECTING && (
         <Text style={styles.reconnectHint}>
           Network changed — restoring connection
         </Text>
@@ -652,7 +602,6 @@ export default function CallScreen({ route, navigation }) {
   // ─── Render: Video Mode ────────────────────────────────────────────────────
   const renderVideoMode = () => (
     <View style={styles.videoContainer}>
-      {/* Remote Video (full screen) */}
       {remoteStream && RTCView ? (
         <RTCView
           streamURL={remoteStream.toURL()}
@@ -670,75 +619,7 @@ export default function CallScreen({ route, navigation }) {
           <Text style={styles.waitingText}>Waiting for video...</Text>
         </View>
       )}
-
-      {/* Local Video PiP */}
-      {localStream && RTCView && !isCameraOff && (
-        <Animated.View
-          style={[
-            styles.localPreview,
-            {
-              borderColor: glowAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [
-                  "rgba(253, 214, 61, 0.3)",
-                  "rgba(253, 214, 61, 0.7)",
-                ],
-              }),
-            },
-          ]}
-        >
-          <RTCView
-            streamURL={localStream.toURL()}
-            style={styles.localVideo}
-            objectFit="cover"
-            mirror={true}
-            zOrder={1}
-          />
-        </Animated.View>
-      )}
     </View>
-  );
-
-  // ─── Render: Control Button ────────────────────────────────────────────────
-  const ControlButton = ({
-    icon,
-    label,
-    active,
-    danger,
-    onPress,
-    style: customStyle,
-  }) => (
-    <TouchableOpacity
-      onPress={onPress}
-      style={[
-        styles.controlBtn,
-        active && styles.controlBtnActive,
-        danger && styles.controlBtnDanger,
-        customStyle,
-      ]}
-      activeOpacity={0.7}
-    >
-      <Text
-        style={[
-          styles.controlIcon,
-          active && styles.controlIconActive,
-          danger && styles.controlIconDanger,
-        ]}
-      >
-        {icon}
-      </Text>
-      {label && (
-        <Text
-          style={[
-            styles.controlLabel,
-            active && styles.controlLabelActive,
-            danger && styles.controlLabelDanger,
-          ]}
-        >
-          {label}
-        </Text>
-      )}
-    </TouchableOpacity>
   );
 
   // ─── Main Render ────────────────────────────────────────────────────────────
@@ -757,47 +638,152 @@ export default function CallScreen({ route, navigation }) {
           ? renderAudioOnly()
           : renderVideoMode()}
 
-      {/* ─── Top Bar (Gradient Overlay) ─────────────────────────────── */}
-      <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
+      {/* Tap overlay to toggle controls */}
+      {isConnected && (
+        <TouchableWithoutFeedback onPress={toggleControls}>
+          <View style={styles.tapZone} />
+        </TouchableWithoutFeedback>
+      )}
+
+      {/* ─── Top Bar ─────────────────────────────────────────────────── */}
+      <Animated.View
+        style={[
+          styles.topBar,
+          { paddingTop: insets.top + 8 },
+          {
+            opacity: overlayAnim,
+            transform: [
+              {
+                translateY: overlayAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-80, 0],
+                }),
+              },
+            ],
+          },
+        ]}
+        pointerEvents={controlsVisible ? "auto" : "none"}
+      >
         <View style={styles.topBarContent}>
-          <View style={styles.topLeft}>
-            {isConnected && renderQualityBars()}
-          </View>
-          <View style={styles.topCenter}>
-            <Text style={styles.topCallerName}>{callerName || "Unknown"}</Text>
-            <Text
-              style={[
-                styles.topStatus,
-                callState === CALL_STATES.RECONNECTING && {
-                  color: colors.warning,
-                },
-              ]}
-            >
-              {getStatusText()}
-            </Text>
-          </View>
-          <View style={styles.topRight}>
-            {isAudioOnly && isConnected && (
-              <View style={styles.audioOnlyBadge}>
-                <Text style={styles.audioOnlyBadgeText}>🎤</Text>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => handleCallEnd("user_hangup")}
+            activeOpacity={0.7}
+          >
+            <Icon name="chevron-left" size={28} color="#fff" />
+          </TouchableOpacity>
+
+          <View style={styles.callerInfo}>
+            <View style={styles.avatarSmall}>
+              <Text style={styles.avatarSmallText}>
+                {(callerName || "?").charAt(0).toUpperCase()}
+              </Text>
+            </View>
+            <View style={styles.callerDetails}>
+              <Text style={styles.topCallerName} numberOfLines={1}>
+                {callerName || "Unknown"}
+              </Text>
+              <View style={styles.timerRow}>
+                <Icon
+                  name="phone"
+                  size={11}
+                  color={isConnected ? "#10b981" : "rgba(255,255,255,0.5)"}
+                />
+                <Text
+                  style={[
+                    styles.topStatus,
+                    isConnected && { color: "#10b981" },
+                    callState === CALL_MANAGER_STATES.RECONNECTING && {
+                      color: colors.warning,
+                    },
+                  ]}
+                >
+                  {getStatusText()}
+                </Text>
               </View>
-            )}
+            </View>
+          </View>
+
+          <View style={styles.topRightActions}>
+            {isConnected && renderQualityBars()}
+            <TouchableOpacity
+              style={styles.settingsButton}
+              onPress={() => {
+                haptic("light");
+                setShowStats(!showStats);
+              }}
+              activeOpacity={0.7}
+            >
+              <Icon name="settings" size={18} color="rgba(255,255,255,0.6)" />
+            </TouchableOpacity>
           </View>
         </View>
-      </View>
+      </Animated.View>
 
       {/* ─── Stats Overlay ──────────────────────────────────────────── */}
       {renderStatsOverlay()}
 
-      {/* ─── Bottom Controls (Glassmorphic) ─────────────────────────── */}
+      {/* ─── Local PiP (animated independently) ──────────────────── */}
+      {isLive && localStream && RTCView && !isCameraOff && (
+        <Animated.View
+          style={[
+            styles.pipWrapper,
+            {
+              opacity: overlayAnim,
+              transform: [
+                {
+                  translateX: overlayAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [140, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+          pointerEvents={controlsVisible ? "auto" : "none"}
+        >
+          <Animated.View
+            style={[
+              styles.localPreview,
+              {
+                borderColor: glowAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [
+                    "rgba(255, 255, 255, 0.15)",
+                    "rgba(255, 255, 255, 0.4)",
+                  ],
+                }),
+              },
+            ]}
+          >
+            <RTCView
+              streamURL={localStream.toURL()}
+              style={styles.localVideo}
+              objectFit="cover"
+              mirror={true}
+              zOrder={1}
+            />
+          </Animated.View>
+          <TouchableOpacity
+            style={styles.switchCameraBtn}
+            onPress={switchCamera}
+            activeOpacity={0.7}
+          >
+            <Icon name="refresh-cw" size={13} color="#fff" />
+          </TouchableOpacity>
+        </Animated.View>
+      )}
+
+      {/* ─── Bottom Controls ──────────────────────────────────────── */}
       <Animated.View
         style={[
           styles.controlBar,
+          { paddingBottom: insets.bottom + 16 },
           {
-            paddingBottom: insets.bottom + 12,
+            opacity: overlayAnim,
             transform: [
               {
-                translateY: controlsAnim.interpolate({
+                translateY: overlayAnim.interpolate({
                   inputRange: [0, 1],
                   outputRange: [120, 0],
                 }),
@@ -805,41 +791,38 @@ export default function CallScreen({ route, navigation }) {
             ],
           },
         ]}
+        pointerEvents={controlsVisible ? "auto" : "none"}
       >
-        <View style={styles.controlBarInner}>
-          {/* Row 1: Media Controls */}
-          <View style={styles.controlRow}>
-            <ControlButton
-              icon={isMuted ? "🔇" : "🎙️"}
-              label={isMuted ? "Unmute" : "Mute"}
-              active={isMuted}
-              onPress={toggleMute}
-            />
-            <ControlButton
-              icon={isCameraOff ? "📷" : "📹"}
-              label={isCameraOff ? "Camera On" : "Camera Off"}
-              active={isCameraOff}
-              onPress={toggleCamera}
-            />
-            <ControlButton icon="🔄" label="Flip" onPress={switchCamera} />
-          </View>
-
-          {/* End Call Button */}
-          <Animated.View
-            style={[
-              styles.endCallWrapper,
-              { transform: [{ scale: pulseAnim }] },
-            ]}
+        <View style={styles.controlRow}>
+          <TouchableOpacity
+            style={[styles.controlBtn, isCameraOff && styles.controlBtnActive]}
+            onPress={toggleCamera}
+            activeOpacity={0.7}
           >
+            <Icon
+              name={isCameraOff ? "video-off" : "video"}
+              size={22}
+              color="#fff"
+            />
+          </TouchableOpacity>
+
+          <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
               style={styles.endCallBtn}
               onPress={() => handleCallEnd("user_hangup")}
               activeOpacity={0.8}
             >
-              <Text style={styles.endCallIcon}>📞</Text>
-              <Text style={styles.endCallLabel}>End</Text>
+              <Icon name="phone-off" size={26} color="#fff" />
             </TouchableOpacity>
           </Animated.View>
+
+          <TouchableOpacity
+            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+            onPress={toggleMute}
+            activeOpacity={0.7}
+          >
+            <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+          </TouchableOpacity>
         </View>
       </Animated.View>
     </Animated.View>
@@ -853,6 +836,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#050508",
   },
 
+  // ─── Tap Zone ──────────────────────────────────────────────────────
+  tapZone: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 5,
+  },
+
   // ─── Top Bar ───────────────────────────────────────────────────────
   topBar: {
     position: "absolute",
@@ -860,65 +849,95 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     zIndex: 10,
-    paddingHorizontal: 20,
+    paddingHorizontal: 12,
     paddingBottom: 16,
-    // Gradient overlay implemented via background + opacity
-    backgroundColor: "rgba(5, 5, 16, 0.65)",
   },
   topBarContent: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
   },
-  topLeft: { flex: 1, alignItems: "flex-start" },
-  topCenter: { flex: 2, alignItems: "center" },
-  topRight: { flex: 1, alignItems: "flex-end" },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  callerInfo: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    marginLeft: 4,
+  },
+  avatarSmall: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(239, 68, 68, 0.12)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    borderColor: "#ef4444",
+  },
+  avatarSmallText: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: "#ef4444",
+  },
+  callerDetails: {
+    marginLeft: 10,
+  },
   topCallerName: {
-    ...typography.body,
-    fontWeight: "600",
+    fontSize: 16,
+    fontWeight: "700",
     color: "#fff",
-    fontSize: 15,
+    letterSpacing: -0.2,
+  },
+  timerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 2,
   },
   topStatus: {
     fontSize: 13,
-    color: "rgba(255,255,255,0.6)",
-    marginTop: 2,
+    color: "rgba(255,255,255,0.5)",
     fontWeight: "500",
+  },
+  topRightActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  settingsButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    justifyContent: "center",
+    alignItems: "center",
   },
 
   // ─── Quality ──────────────────────────────────────────────────────
   qualityContainer: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 4,
   },
   qualityBars: {
     flexDirection: "row",
     alignItems: "flex-end",
     gap: 2,
-    height: 20,
+    height: 16,
   },
   qualityBar: {
-    width: 4,
-    borderRadius: 2,
+    width: 3,
+    borderRadius: 1.5,
   },
   qualityLabel: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "600",
     letterSpacing: 0.3,
-  },
-
-  // ─── Audio-Only Badge ─────────────────────────────────────────────
-  audioOnlyBadge: {
-    backgroundColor: "rgba(249, 115, 22, 0.2)",
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: "rgba(249, 115, 22, 0.3)",
-  },
-  audioOnlyBadgeText: {
-    fontSize: 14,
   },
 
   // ─── Video ────────────────────────────────────────────────────────
@@ -936,42 +955,62 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   placeholderAvatar: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    backgroundColor: "rgba(253, 214, 61, 0.1)",
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(253, 214, 61, 0.2)",
+    borderColor: "rgba(255, 255, 255, 0.1)",
   },
   placeholderAvatarText: {
-    fontSize: 32,
+    fontSize: 34,
     fontWeight: "700",
-    color: colors.primary,
+    color: "rgba(255, 255, 255, 0.4)",
   },
   waitingText: {
-    color: "rgba(255,255,255,0.4)",
+    color: "rgba(255,255,255,0.3)",
     fontSize: 14,
     marginTop: 16,
     fontWeight: "500",
   },
 
   // ─── Local PiP ────────────────────────────────────────────────────
-  localPreview: {
+  pipWrapper: {
     position: "absolute",
     top: 100,
     right: 16,
+    zIndex: 8,
+  },
+  localPreview: {
     width: 110,
     height: 155,
     borderRadius: 16,
     overflow: "hidden",
-    borderWidth: 2.5,
-    ...shadows.lg,
+    borderWidth: 2,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
   },
   localVideo: {
     width: "100%",
     height: "100%",
+  },
+  switchCameraBtn: {
+    position: "absolute",
+    bottom: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "rgba(0, 0, 0, 0.55)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.15)",
   },
 
   // ─── Connecting State ─────────────────────────────────────────────
@@ -985,17 +1024,17 @@ const styles = StyleSheet.create({
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: "rgba(253, 214, 61, 0.08)",
+    backgroundColor: "rgba(239, 68, 68, 0.08)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(253, 214, 61, 0.2)",
+    borderColor: "rgba(239, 68, 68, 0.2)",
     marginBottom: 20,
   },
   avatarInitial: {
     fontSize: 40,
     fontWeight: "800",
-    color: colors.primary,
+    color: "#ef4444",
   },
   callerNameLarge: {
     fontSize: 26,
@@ -1013,7 +1052,7 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: colors.primary,
+    backgroundColor: "#fff",
   },
   statusLabel: {
     fontSize: 15,
@@ -1040,24 +1079,24 @@ const styles = StyleSheet.create({
     height: 120,
     borderRadius: 60,
     borderWidth: 2,
-    borderColor: colors.primary,
+    borderColor: "rgba(255, 255, 255, 0.15)",
   },
   audioAvatar: {
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: "rgba(253, 214, 61, 0.1)",
+    backgroundColor: "rgba(255, 255, 255, 0.06)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(253, 214, 61, 0.25)",
+    borderColor: "rgba(255, 255, 255, 0.12)",
     marginBottom: 16,
     zIndex: 1,
   },
   audioAvatarText: {
     fontSize: 40,
     fontWeight: "800",
-    color: colors.primaryLight,
+    color: "rgba(255, 255, 255, 0.6)",
   },
   audioCallerName: {
     fontSize: 22,
@@ -1079,102 +1118,78 @@ const styles = StyleSheet.create({
   },
   audioModeLabel: {
     fontSize: 13,
-    color: "rgba(255,255,255,0.35)",
+    color: "rgba(255,255,255,0.3)",
     marginTop: 20,
     fontWeight: "600",
     letterSpacing: 1,
     textTransform: "uppercase",
   },
 
-  // ─── Control Bar (Glassmorphic) ───────────────────────────────────
+  // ─── Audio-Only Badge ─────────────────────────────────────────────
+  audioOnlyBadge: {
+    backgroundColor: "rgba(249, 115, 22, 0.15)",
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderWidth: 1,
+    borderColor: "rgba(249, 115, 22, 0.25)",
+  },
+  audioOnlyBadgeText: {
+    fontSize: 12,
+    color: "#f97316",
+    fontWeight: "600",
+  },
+
+  // ─── Control Bar ──────────────────────────────────────────────────
   controlBar: {
     position: "absolute",
     bottom: 0,
     left: 0,
     right: 0,
     zIndex: 10,
-    paddingTop: 16,
-    paddingHorizontal: 16,
-    backgroundColor: "rgba(10, 10, 15, 0.85)",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+    paddingTop: 24,
+    paddingHorizontal: 40,
+    backgroundColor: "rgba(15, 15, 20, 0.9)",
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
     borderTopWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.06)",
-  },
-  controlBarInner: {
-    alignItems: "center",
-    gap: 16,
+    borderColor: "rgba(255, 255, 255, 0.04)",
   },
   controlRow: {
     flexDirection: "row",
-    justifyContent: "center",
-    gap: 20,
+    justifyContent: "space-between",
+    alignItems: "center",
   },
 
   // ─── Control Buttons ──────────────────────────────────────────────
   controlBtn: {
-    width: 64,
-    height: 64,
-    borderRadius: 20,
-    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.06)",
   },
   controlBtnActive: {
-    backgroundColor: "rgba(253, 214, 61, 0.15)",
-    borderColor: "rgba(253, 214, 61, 0.3)",
-  },
-  controlBtnDanger: {
     backgroundColor: "rgba(239, 68, 68, 0.2)",
     borderColor: "rgba(239, 68, 68, 0.3)",
   },
-  controlIcon: {
-    fontSize: 22,
-  },
-  controlIconActive: {},
-  controlIconDanger: {},
-  controlLabel: {
-    fontSize: 10,
-    color: "rgba(255,255,255,0.55)",
-    marginTop: 4,
-    fontWeight: "600",
-    letterSpacing: 0.2,
-  },
-  controlLabelActive: {
-    color: colors.primaryLight,
-  },
-  controlLabelDanger: {
-    color: colors.errorLight,
-  },
 
   // ─── End Call Button ──────────────────────────────────────────────
-  endCallWrapper: {
-    marginTop: 4,
-    marginBottom: 8,
-  },
   endCallBtn: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
     backgroundColor: "#ef4444",
     justifyContent: "center",
     alignItems: "center",
-    ...shadows.lg,
     shadowColor: "#ef4444",
-    shadowOpacity: 0.45,
-    shadowRadius: 16,
-  },
-  endCallIcon: {
-    fontSize: 24,
-    transform: [{ rotate: "135deg" }],
-  },
-  endCallLabel: {
-    fontSize: 10,
-    color: "#fff",
-    fontWeight: "700",
-    marginTop: 2,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
 
   // ─── Stats Overlay ────────────────────────────────────────────────
@@ -1195,7 +1210,7 @@ const styles = StyleSheet.create({
   statsTitle: {
     fontSize: 13,
     fontWeight: "700",
-    color: colors.primaryLight,
+    color: "rgba(255, 255, 255, 0.7)",
     marginBottom: 10,
     letterSpacing: 0.5,
     textTransform: "uppercase",

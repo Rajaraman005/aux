@@ -1,6 +1,6 @@
 /**
- * OTP Verification Screen — Clean light design.
- * 6-digit code input, back arrow, black verify button, resend timer.
+ * OTP Verification Screen — Clean light design, centered layout.
+ * 6-digit code input with paste support, back arrow, verify button, resend timer.
  */
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import {
@@ -11,9 +11,10 @@ import {
   Animated,
   StyleSheet,
   ActivityIndicator,
-  KeyboardAvoidingView,
+  Clipboard,
   Platform,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useAuth } from "../context/AuthContext";
 
 const CODE_LENGTH = 6;
@@ -57,14 +58,44 @@ export default function VerifyScreen({ navigation }) {
     }
   }, [resendCooldown]);
 
+  // Handle paste: fill all boxes from a pasted string
+  const fillFromPaste = useCallback((pastedText) => {
+    const digits = pastedText.replace(/[^0-9]/g, "").slice(0, CODE_LENGTH);
+    if (digits.length === 0) return;
+
+    const newCode = Array(CODE_LENGTH).fill("");
+    for (let i = 0; i < digits.length; i++) {
+      newCode[i] = digits[i];
+    }
+    setCode(newCode);
+    setError("");
+
+    // Focus the next empty box, or the last box
+    const nextEmpty =
+      digits.length < CODE_LENGTH ? digits.length : CODE_LENGTH - 1;
+    inputRefs.current[nextEmpty]?.focus();
+
+    // If all digits filled, auto-verify
+    if (digits.length === CODE_LENGTH) {
+      handleVerify(digits);
+    }
+  }, []);
+
   const handleCodeChange = useCallback(
     (text, index) => {
+      // Detect paste — if text has more than 1 character
+      if (text.length > 1) {
+        fillFromPaste(text);
+        return;
+      }
+
+      const digit = text.replace(/[^0-9]/g, "").slice(-1);
       const newCode = [...code];
-      newCode[index] = text;
+      newCode[index] = digit;
       setCode(newCode);
       setError("");
 
-      if (text && index < CODE_LENGTH - 1) {
+      if (digit && index < CODE_LENGTH - 1) {
         inputRefs.current[index + 1]?.focus();
       }
 
@@ -72,7 +103,7 @@ export default function VerifyScreen({ navigation }) {
         handleVerify(newCode.join(""));
       }
     },
-    [code],
+    [code, fillFromPaste],
   );
 
   const handleKeyPress = (e, index) => {
@@ -95,7 +126,7 @@ export default function VerifyScreen({ navigation }) {
       setIsLoading(true);
       try {
         await verifyEmail(codeStr);
-        navigation.navigate("Login");
+        // verifyEmail now auto-logs the user in — no need to navigate to Login
       } catch (err) {
         setError(err.error || "Invalid code. Please try again.");
         setCode(Array(CODE_LENGTH).fill(""));
@@ -104,7 +135,7 @@ export default function VerifyScreen({ navigation }) {
         setIsLoading(false);
       }
     },
-    [code, verifyEmail, navigation],
+    [code, verifyEmail],
   );
 
   const handleResend = useCallback(async () => {
@@ -120,17 +151,9 @@ export default function VerifyScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        style={{ flex: 1 }}
-      >
-        <Animated.View
-          style={[
-            styles.content,
-            { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
-          ]}
-        >
-          {/* Back Button */}
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
+        {/* Back Button — stays at the top */}
+        <View style={styles.topBar}>
           <TouchableOpacity
             style={styles.backButton}
             onPress={() => navigation.goBack()}
@@ -138,7 +161,15 @@ export default function VerifyScreen({ navigation }) {
           >
             <View style={styles.backArrow} />
           </TouchableOpacity>
+        </View>
 
+        {/* Centered Content */}
+        <Animated.View
+          style={[
+            styles.content,
+            { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
+          ]}
+        >
           {/* Header */}
           <View style={styles.header}>
             <Text style={styles.title}>We just sent an Email</Text>
@@ -164,13 +195,14 @@ export default function VerifyScreen({ navigation }) {
                     error && styles.codeInputError,
                   ]}
                   value={code[i]}
-                  onChangeText={(text) =>
-                    handleCodeChange(text.replace(/[^0-9]/g, "").slice(-1), i)
-                  }
+                  onChangeText={(text) => handleCodeChange(text, i)}
                   onKeyPress={(e) => handleKeyPress(e, i)}
                   keyboardType="number-pad"
-                  maxLength={1}
+                  maxLength={6}
                   editable={!isLoading}
+                  autoComplete="off"
+                  textContentType="oneTimeCode"
+                  selectTextOnFocus
                 />
               ))}
           </View>
@@ -222,10 +254,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#FAFAFA",
   },
+  topBar: {
+    paddingHorizontal: 24,
+    paddingTop: 50,
+  },
   content: {
     flex: 1,
     paddingHorizontal: 24,
-    paddingTop: 50,
+    justifyContent: "center",
+    marginTop: -40,
   },
 
   // Back Button
@@ -236,7 +273,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#F0F0F0",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 32,
     alignSelf: "flex-start",
   },
   backArrow: {
@@ -300,8 +336,8 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   codeInputFilled: {
-    borderColor: "#fdd63d",
-    backgroundColor: "#FFFDF5",
+    borderColor: "#22c15a",
+    backgroundColor: "#F0FFF4",
   },
   codeInputError: {
     borderColor: "#EF4444",

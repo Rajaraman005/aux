@@ -275,6 +275,7 @@ class SignalingClient {
   }
 
   hangUp(callId) {
+    if (!callId) return false;
     const result = this.send({ type: "hang-up", callId });
     this._activeCallId = null; // ★ Clear active call
     return result;
@@ -286,6 +287,10 @@ class SignalingClient {
 
   sendCallMetrics(callId, stats) {
     return this.send({ type: "call-metrics", callId, stats });
+  }
+
+  sendCallStatus(callId) {
+    return this.send({ type: "call-status", callId });
   }
 
   // ─── Chat Helpers ───────────────────────────────────────────────────────────

@@ -21,6 +21,11 @@ const { isBlocked, recordFailure } = require("../middleware/abuse");
 const presence = require("./presence");
 const { db } = require("../db/supabase");
 const metrics = require("../services/metrics");
+const {
+  sendMessagePush,
+  sendCallPush,
+  sendMissedCallPush,
+} = require("../services/pushService");
 
 // Active calls: callId -> { callerId, calleeId, startedAt, state }
 const activeCalls = new Map();
@@ -144,6 +149,9 @@ function initializeSignaling(wss) {
           case "call-metrics":
             await handleCallMetrics(message);
             break;
+          case "call-status":
+            handleCallStatus(message, ws);
+            break;
           case "chat-message":
             await handleChatMessage(userId, userName, message, ws);
             break;
@@ -234,6 +242,8 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
   // Check if target is online
   const targetOnline = await presence.isOnline(targetUserId);
   if (!targetOnline) {
+    // Send high-priority push notification for incoming call
+    await sendCallPush(targetUserId, callerId, callerName, uuidv4());
     callerWs.send(
       JSON.stringify({
         type: "call-failed",
@@ -311,6 +321,8 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
         callId,
         reason: "timeout",
       });
+      // Send missed call push notification
+      await sendMissedCallPush(targetUserId, callerName);
       await finalizeCall(callId, "no_answer");
     }
   }, 30000);
@@ -423,7 +435,8 @@ async function handleHangUp(userId, message) {
   const { callId } = message;
   const call = activeCalls.get(callId);
 
-  if (!call) return;
+  // ★ Guard against already-ended or missing calls
+  if (!call || call.state === "ended") return;
 
   const otherUserId = call.callerId === userId ? call.calleeId : call.callerId;
   await presence.sendToUser(otherUserId, {
@@ -433,6 +446,20 @@ async function handleHangUp(userId, message) {
   });
 
   await finalizeCall(callId, "normal");
+}
+
+// ★ Call Status Query (for client-side network reconciliation)
+function handleCallStatus(message, ws) {
+  const { callId } = message;
+  const call = activeCalls.get(callId);
+  ws.send(
+    JSON.stringify({
+      type: "call-status-response",
+      callId,
+      active: !!call && call.state !== "ended",
+      state: call?.state || "not_found",
+    }),
+  );
 }
 
 async function handleCallMetrics(message) {
@@ -465,7 +492,8 @@ async function handleCallMetrics(message) {
 
 async function finalizeCall(callId, reason) {
   const call = activeCalls.get(callId);
-  if (!call) return;
+  // ★ Guard against double-finalization
+  if (!call || call.state === "ended") return;
 
   call.state = "ended";
   const duration = Date.now() - call.startedAt;
@@ -525,6 +553,9 @@ async function handleChatMessage(userId, userName, message, ws) {
           conversationId,
           message: { ...savedMessage, senderName: userName },
         });
+
+        // Also send push notification (pushService internally checks if user is offline)
+        await sendMessagePush(participantId, userName, content.trim());
       }
     }
   } catch (err) {
@@ -614,6 +645,62 @@ async function handleWorldMessage(userId, userName, message, ws, wss) {
         );
       }
     });
+
+    // ── @mention detection + notification ──────────────────────────────
+    const mentionRegex = /@(\w+)/g;
+    let match;
+    const mentionedNames = new Set();
+    while ((match = mentionRegex.exec(content)) !== null) {
+      mentionedNames.add(match[1].toLowerCase());
+    }
+
+    if (mentionedNames.size > 0) {
+      // Look up all users to find matches (batch for efficiency)
+      for (const mentionName of mentionedNames) {
+        try {
+          const results = await db.searchUsers(mentionName, 5, 0);
+          for (const mentionedUser of results) {
+            if (
+              mentionedUser.id !== userId &&
+              mentionedUser.name.toLowerCase() === mentionName
+            ) {
+              // 5-minute aggregation bucket
+              const bucket = Math.floor(Date.now() / (5 * 60 * 1000));
+              const groupKey = `world_mention:${mentionedUser.id}:${bucket}`;
+
+              const notification = await db.createNotification({
+                user_id: mentionedUser.id,
+                type: "world_mention",
+                title: "Mentioned in World Chat",
+                body: `${userName} mentioned you in World Chat`,
+                data: {
+                  sender_id: userId,
+                  sender_name: userName,
+                  message_id: savedMessage.id,
+                },
+                priority: 0,
+                group_key: groupKey,
+              });
+
+              // Update body if aggregated
+              if (notification.data?.count > 1) {
+                notification.body = `You were mentioned ${notification.data.count} times in World Chat`;
+              }
+
+              // Real-time push
+              presence
+                .sendToUser(mentionedUser.id, {
+                  type: "notification:new",
+                  notification,
+                })
+                .catch(() => {});
+            }
+          }
+        } catch (mentionErr) {
+          console.error("Mention notification error:", mentionErr.message);
+        }
+      }
+    }
   } catch (err) {
     console.error("World message error:", err.message);
     ws.send(

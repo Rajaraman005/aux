@@ -15,6 +15,7 @@ const { initializeSignaling } = require("./signaling/handler");
 const redisBridge = require("./signaling/redis");
 const presence = require("./signaling/presence");
 const metrics = require("./services/metrics");
+const { pushMetrics } = require("./services/pushService");
 
 const app = express();
 const server = http.createServer(app);
@@ -60,6 +61,9 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/conversations", require("./routes/chat"));
 app.use("/api/world", require("./routes/world"));
+app.use("/api/push", require("./routes/pushRoutes"));
+app.use("/api/friends", require("./routes/friends"));
+app.use("/api/notifications", require("./routes/notifications"));
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
@@ -68,6 +72,7 @@ app.get("/health", (req, res) => {
     uptime: process.uptime(),
     connections: presence.getLocalConnectionCount(),
     redis: redisBridge.isConnected,
+    push: pushMetrics.getStats(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -151,6 +156,21 @@ async function start() {
       `   Redis:       ${redisBridge.isConnected ? "✅ Connected" : "⚠️  In-Memory Fallback"}`,
     );
     console.log(`${"═".repeat(50)}\n`);
+
+    // ─── Daily Notification Cleanup (90-day expiration) ────────────────
+    const { db: notifDb } = require("./db/supabase");
+    setInterval(
+      () => {
+        notifDb
+          .cleanupExpiredNotifications(90)
+          .catch((err) =>
+            console.error("Notification cleanup error:", err.message),
+          );
+      },
+      24 * 60 * 60 * 1000,
+    );
+    // Run once on startup
+    notifDb.cleanupExpiredNotifications(90).catch(() => {});
   });
 }
 

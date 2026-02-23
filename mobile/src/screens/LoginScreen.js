@@ -9,14 +9,13 @@ import {
   TextInput,
   TouchableOpacity,
   Animated,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   ActivityIndicator,
   Dimensions,
   Image,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import Feather from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 
@@ -74,10 +73,7 @@ export default function LoginScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        style={{ flex: 1 }}
-      >
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
@@ -131,8 +127,9 @@ export default function LoginScreen({ navigation }) {
                     keyboardType="email-address"
                     autoCapitalize="none"
                     autoCorrect={false}
-                    autoComplete="email"
-                    textContentType="emailAddress"
+                    autoComplete="off"
+                    importantForAutofill="no"
+                    textContentType="none"
                     editable={!isLoading}
                     onFocus={() => setEmailFocused(true)}
                     onBlur={() => setEmailFocused(false)}
@@ -156,15 +153,14 @@ export default function LoginScreen({ navigation }) {
                     style={styles.inputIconSvg}
                   />
                   <TextInput
-                    key={showPassword ? "visible" : "hidden"}
                     style={styles.input}
                     placeholder="Enter password"
                     placeholderTextColor="#A0A0A0"
                     value={password}
                     onChangeText={setPassword}
                     secureTextEntry={!showPassword}
-                    autoComplete="password"
-                    textContentType="password"
+                    autoComplete="off"
+                    textContentType="oneTimeCode"
                     editable={!isLoading}
                     onFocus={() => setPasswordFocused(true)}
                     onBlur={() => setPasswordFocused(false)}
@@ -312,8 +308,8 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   inputWrapperFocused: {
-    borderColor: "#fdd63d",
-    shadowColor: "#fdd63d",
+    borderColor: "#22c15a",
+    shadowColor: "#22c15a",
     shadowOpacity: 0.1,
     shadowRadius: 8,
     elevation: 3,
@@ -334,7 +330,7 @@ const styles = StyleSheet.create({
   eyeText: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#fdd63d",
+    color: "#22c15a",
   },
 
   // Error
@@ -388,7 +384,7 @@ const styles = StyleSheet.create({
     fontWeight: "400",
   },
   signupBold: {
-    color: "#fdd63d",
+    color: "#22c15a",
     fontWeight: "700",
   },
 });

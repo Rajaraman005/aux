@@ -28,7 +28,16 @@ const endpoints = {
     list: `${API_BASE}/api/users`,
     search: `${API_BASE}/api/users/search`,
     me: `${API_BASE}/api/users/me`,
+    password: `${API_BASE}/api/users/me/password`,
     profile: (id) => `${API_BASE}/api/users/${id}`,
+  },
+  friends: {
+    list: `${API_BASE}/api/friends`,
+    request: `${API_BASE}/api/friends/request`,
+    withdraw: (targetUserId) =>
+      `${API_BASE}/api/friends/request/${targetUserId}`,
+    requests: `${API_BASE}/api/friends/requests`,
+    respond: (id) => `${API_BASE}/api/friends/${id}`,
   },
   conversations: {
     list: `${API_BASE}/api/conversations`,
@@ -38,9 +47,29 @@ const endpoints = {
     read: (id) => `${API_BASE}/api/conversations/${id}/read`,
   },
   world: `${API_BASE}/api/world`,
+  notifications: {
+    list: `${API_BASE}/api/notifications`,
+    count: `${API_BASE}/api/notifications/count`,
+    read: (id) => `${API_BASE}/api/notifications/${id}/read`,
+    readAll: `${API_BASE}/api/notifications/read-all`,
+  },
   turn: `${API_BASE}/api/turn-credentials`,
   metrics: `${API_BASE}/api/metrics/call`,
   health: `${API_BASE}/health`,
+  push: {
+    register: `${API_BASE}/api/push/register`,
+    unregister: `${API_BASE}/api/push/unregister`,
+  },
+  oauth: {
+    googleUrl: `${API_BASE}/api/oauth/google/url`,
+    connections: `${API_BASE}/api/oauth/connections`,
+    disconnect: (provider) => `${API_BASE}/api/oauth/${provider}`,
+  },
+  feed: {
+    list: `${API_BASE}/api/feed`,
+    refresh: `${API_BASE}/api/feed/refresh`,
+    sources: `${API_BASE}/api/feed/sources`,
+  },
 };
 
 export { API_BASE, WS_BASE, endpoints };

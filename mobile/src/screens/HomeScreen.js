@@ -47,6 +47,26 @@ export default function HomeScreen({ navigation }) {
   const [activeFilter, setActiveFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+
+  // Fetch unread notification count
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const data = await apiClient.get(endpoints.notifications.count);
+        setUnreadNotifCount(data.unread_count);
+      } catch (err) {
+        // Non-critical
+      }
+    };
+    fetchCount();
+
+    // Real-time badge update
+    const unsub = signalingClient.on("notification:new", () => {
+      setUnreadNotifCount((prev) => prev + 1);
+    });
+    return () => unsub();
+  }, []);
 
   // ─── Fetch Conversations ───────────────────────────────────────────────
   const fetchConversations = useCallback(async () => {
@@ -174,9 +194,21 @@ export default function HomeScreen({ navigation }) {
         <View style={styles.headerRow}>
           <Text style={styles.greeting}>Let's Aux</Text>
           <TouchableOpacity
+            onPress={() => {
+              setUnreadNotifCount(0);
+              navigation.navigate("Notifications");
+            }}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            style={styles.notifBtn}
           >
-            <Icon name="grid" size={22} color={colors.textPrimary} />
+            <Icon name="bell" size={22} color={colors.textPrimary} />
+            {unreadNotifCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>
+                  {unreadNotifCount > 99 ? "99+" : unreadNotifCount}
+                </Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
         {/* Row 2: Search bar */}
@@ -228,7 +260,10 @@ export default function HomeScreen({ navigation }) {
           data={conversations}
           renderItem={renderChatItem}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={[
+            styles.listContent,
+            conversations.length === 0 && { flexGrow: 1 },
+          ]}
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl
@@ -279,6 +314,35 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: colors.textPrimary,
     letterSpacing: -0.3,
+  },
+  notifBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.bgCard,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  bellBadge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    backgroundColor: "#ef4444",
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: colors.bg,
+  },
+  bellBadgeText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#FFFFFF",
   },
   searchBar: {
     flexDirection: "row",
@@ -399,8 +463,9 @@ const styles = StyleSheet.create({
 
   // Empty State
   emptyContainer: {
+    flex: 1,
     alignItems: "center",
-    paddingTop: 80,
+    justifyContent: "center",
   },
   emptyTitle: {
     ...typography.h3,

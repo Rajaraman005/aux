@@ -9,13 +9,12 @@ import {
   TextInput,
   TouchableOpacity,
   Animated,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   ActivityIndicator,
   Dimensions,
 } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import Feather from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 
@@ -148,6 +147,9 @@ export default function SignupScreen({ navigation }) {
           value={form[field]}
           onChangeText={(v) => updateField(field, v)}
           editable={!isLoading}
+          autoComplete="off"
+          importantForAutofill="no"
+          textContentType="none"
           onFocus={() => setFieldFocused(field, true)}
           onBlur={() => setFieldFocused(field, false)}
           {...options}
@@ -159,10 +161,7 @@ export default function SignupScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        style={{ flex: 1 }}
-      >
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
@@ -221,15 +220,14 @@ export default function SignupScreen({ navigation }) {
                     style={styles.inputIconSvg}
                   />
                   <TextInput
-                    key={showPassword ? "pw-visible" : "pw-hidden"}
                     style={styles.input}
                     placeholder="Min. 8 characters"
                     placeholderTextColor="#A0A0A0"
                     value={form.password}
                     onChangeText={(v) => updateField("password", v)}
                     secureTextEntry={!showPassword}
-                    autoComplete="password"
-                    textContentType="password"
+                    autoComplete="off"
+                    textContentType="oneTimeCode"
                     editable={!isLoading}
                     onFocus={() => setFieldFocused("password", true)}
                     onBlur={() => setFieldFocused("password", false)}
@@ -293,15 +291,14 @@ export default function SignupScreen({ navigation }) {
                     style={styles.inputIconSvg}
                   />
                   <TextInput
-                    key={showPassword ? "cpw-visible" : "cpw-hidden"}
                     style={styles.input}
                     placeholder="Re-enter password"
                     placeholderTextColor="#A0A0A0"
                     value={form.confirmPassword}
                     onChangeText={(v) => updateField("confirmPassword", v)}
                     secureTextEntry={!showPassword}
-                    autoComplete="password"
-                    textContentType="password"
+                    autoComplete="off"
+                    textContentType="oneTimeCode"
                     editable={!isLoading}
                     onFocus={() => setFieldFocused("confirmPassword", true)}
                     onBlur={() => setFieldFocused("confirmPassword", false)}
@@ -450,9 +447,9 @@ const styles = StyleSheet.create({
     elevation: 1,
   },
   inputWrapperFocused: {
-    borderColor: "#fdd63d",
-    shadowColor: "#fdd63d",
-    shadowOpacity: 0.1,
+    borderColor: "#22c15a",
+    shadowColor: "#22c15a",
+    shadowOpacity: 0.12,
     shadowRadius: 8,
     elevation: 3,
   },
@@ -482,7 +479,7 @@ const styles = StyleSheet.create({
   eyeText: {
     fontSize: 13,
     fontWeight: "600",
-    color: "#fdd63d",
+    color: "#22c15a",
   },
   fieldError: {
     fontSize: 12,
@@ -564,7 +561,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
   termsLink: {
-    color: "#fdd63d",
+    color: "#22c15a",
     fontWeight: "600",
   },
 
@@ -579,7 +576,7 @@ const styles = StyleSheet.create({
     fontWeight: "400",
   },
   linkBold: {
-    color: "#fdd63d",
+    color: "#22c15a",
     fontWeight: "700",
   },
 });
