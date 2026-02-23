@@ -2,7 +2,7 @@
  * Settings Screen — Clean profile-centric design.
  * Centered avatar, name/email, flat menu rows, version footer.
  */
-import React from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useNavigation } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
+import CustomPopup from "../components/CustomPopup";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -49,6 +50,7 @@ export default function SettingsScreen() {
   const { user, logout } = useAuth();
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
+  const [showLogoutPopup, setShowLogoutPopup] = useState(false);
 
   return (
     <View style={styles.container}>
@@ -105,7 +107,7 @@ export default function SettingsScreen() {
         {/* ─── Logout ─────────────────────────────────────────────── */}
         <TouchableOpacity
           style={styles.menuRow}
-          onPress={logout}
+          onPress={() => setShowLogoutPopup(true)}
           activeOpacity={0.6}
         >
           <Icon
@@ -119,8 +121,30 @@ export default function SettingsScreen() {
         </TouchableOpacity>
 
         {/* ─── Version ────────────────────────────────────────────── */}
-        <Text style={styles.version}>Aux v1.0.0</Text>
+        <Text style={styles.version}>Aux v1.1.0</Text>
       </ScrollView>
+
+      {/* ─── Logout Confirmation ─────────────────────────────────── */}
+      <CustomPopup
+        visible={showLogoutPopup}
+        title="Logout"
+        message="Are you sure you want to logout?"
+        buttons={[
+          {
+            text: "Cancel",
+            onPress: () => setShowLogoutPopup(false),
+          },
+          {
+            text: "Logout",
+            danger: true,
+            onPress: () => {
+              setShowLogoutPopup(false);
+              logout();
+            },
+          },
+        ]}
+        onClose={() => setShowLogoutPopup(false)}
+      />
     </View>
   );
 }

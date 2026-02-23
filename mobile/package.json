@@ -6,6 +6,9 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
+    "bump-version": "node scripts/bump-version.js",
+    "prebuild": "node scripts/bump-version.js",
+    "build": "node scripts/bump-version.js && eas build",
     "test": "jest"
   },
   "dependencies": {
