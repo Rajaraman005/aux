@@ -9,11 +9,11 @@ const DEV_SERVER_IP = "192.168.1.5";
 
 const API_BASE = __DEV__
   ? `http://${DEV_SERVER_IP}:3000`
-  : "https://your-production-url.com";
+  : "https://aux-server.onrender.com";
 
 const WS_BASE = __DEV__
   ? `ws://${DEV_SERVER_IP}:3000/ws`
-  : "wss://your-production-url.com/ws";
+  : "wss://aux-server.onrender.com/ws";
 
 const endpoints = {
   auth: {
