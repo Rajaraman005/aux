@@ -2,21 +2,26 @@
   "expo": {
     "name": "Aux",
     "slug": "videocall",
-    "version": "1.1.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
       "backgroundColor": "#0a0a1a"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aux.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Aux needs camera access for video calls",
         "NSMicrophoneUsageDescription": "Aux needs microphone access for audio calls",
-        "UIBackgroundModes": ["voip", "audio"]
+        "UIBackgroundModes": [
+          "voip",
+          "audio"
+        ]
       },
       "bitcode": false
     },
@@ -42,7 +47,9 @@
         {
           "cameraPermission": "Aux needs camera access for video calls",
           "microphonePermission": "Aux needs microphone access for audio calls",
-          "androidAbiFilters": ["arm64-v8a"]
+          "androidAbiFilters": [
+            "arm64-v8a"
+          ]
         }
       ],
       [

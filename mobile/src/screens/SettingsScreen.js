@@ -121,7 +121,7 @@ export default function SettingsScreen() {
         </TouchableOpacity>
 
         {/* ─── Version ────────────────────────────────────────────── */}
-        <Text style={styles.version}>Aux v1.1.0</Text>
+        <Text style={styles.version}>Aux v1.0.1</Text>
       </ScrollView>
 
       {/* ─── Logout Confirmation ─────────────────────────────────── */}
