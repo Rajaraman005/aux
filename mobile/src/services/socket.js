@@ -300,6 +300,11 @@ class SignalingClient {
   sendMessageRead(conversationId) {
     return this.send({ type: "message-read", conversationId });
   }
+
+  // ─── World Chat Helpers ─────────────────────────────────────────────────────
+  sendWorldMessage(content, tempId) {
+    return this.send({ type: "world-message", content, tempId });
+  }
 }
 
 // Singleton

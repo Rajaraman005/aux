@@ -59,6 +59,7 @@ if (config.isDev) {
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/conversations", require("./routes/chat"));
+app.use("/api/world", require("./routes/world"));
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {

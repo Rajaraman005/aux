@@ -153,6 +153,9 @@ function initializeSignaling(wss) {
           case "message-read":
             await handleMessageRead(userId, message);
             break;
+          case "world-message":
+            await handleWorldMessage(userId, userName, message, ws, wss);
+            break;
           case "heartbeat":
             ws.send(
               JSON.stringify({ type: "heartbeat-ack", timestamp: Date.now() }),
@@ -574,6 +577,52 @@ async function handleMessageRead(userId, message) {
     }
   } catch (err) {
     console.error("Message read error:", err.message);
+  }
+}
+
+async function handleWorldMessage(userId, userName, message, ws, wss) {
+  const { content, tempId } = message;
+  if (!content || content.trim().length === 0) return;
+  if (content.length > 1000) return;
+
+  try {
+    const user = await db.getUserById(userId);
+    const savedMessage = await db.createWorldMessage({
+      sender_id: userId,
+      sender_name: userName,
+      sender_avatar: user?.avatar_seed || userId,
+      content: content.trim(),
+    });
+
+    // Confirm to sender (maps tempId → real ID)
+    ws.send(
+      JSON.stringify({
+        type: "world-message-confirmed",
+        tempId,
+        message: savedMessage,
+      }),
+    );
+
+    // Broadcast to ALL other connected clients
+    wss.clients.forEach((client) => {
+      if (client !== ws && client.readyState === 1) {
+        client.send(
+          JSON.stringify({
+            type: "world-message-received",
+            message: savedMessage,
+          }),
+        );
+      }
+    });
+  } catch (err) {
+    console.error("World message error:", err.message);
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        code: "WORLD_CHAT_ERROR",
+        message: "Failed to send world message",
+      }),
+    );
   }
 }
 

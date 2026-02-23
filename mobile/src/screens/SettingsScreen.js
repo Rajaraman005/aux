@@ -5,13 +5,7 @@ import React from "react";
 import { View, Text, TouchableOpacity, StyleSheet, Image } from "react-native";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
-import {
-  colors,
-  typography,
-  spacing,
-  radius,
-  shadows,
-} from "../styles/theme";
+import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -28,7 +22,7 @@ export default function SettingsScreen() {
       <View style={styles.profileCard}>
         <Image
           source={{
-            uri: `${AVATAR_BASE}${user?.avatar_seed || user?.name}`,
+            uri: `${AVATAR_BASE}${encodeURIComponent(user?.name || "User")}`,
           }}
           style={styles.avatar}
         />
@@ -53,7 +47,7 @@ export default function SettingsScreen() {
           <Text style={styles.menuText}>Privacy</Text>
           <Icon name="chevron-right" size={18} color={colors.textMuted} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity style={[styles.menuItem, { borderBottomWidth: 0 }]}>
           <Icon name="help-circle" size={20} color={colors.textSecondary} />
           <Text style={styles.menuText}>Help & Support</Text>
           <Icon name="chevron-right" size={18} color={colors.textMuted} />
@@ -97,14 +91,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: spacing.lg,
     borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.08)",
+    borderColor: colors.border,
   },
   avatar: {
     width: 80,
     height: 80,
     borderRadius: 40,
     marginBottom: spacing.md,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: "transparent",
   },
   userName: {
     ...typography.h3,
@@ -121,7 +115,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.lg,
     overflow: "hidden",
     borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.08)",
+    borderColor: colors.border,
   },
   menuItem: {
     flexDirection: "row",
@@ -129,7 +123,7 @@ const styles = StyleSheet.create({
     paddingVertical: 16,
     paddingHorizontal: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(255,255,255,0.04)",
+    borderBottomColor: colors.borderLight,
   },
   menuText: {
     flex: 1,
@@ -144,7 +138,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(239, 68, 68, 0.1)",
+    backgroundColor: "rgba(239, 68, 68, 0.08)",
     borderRadius: radius.lg,
     paddingVertical: 16,
     gap: 10,

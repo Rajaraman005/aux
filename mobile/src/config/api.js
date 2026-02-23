@@ -37,6 +37,7 @@ const endpoints = {
     send: (id) => `${API_BASE}/api/conversations/${id}/messages`,
     read: (id) => `${API_BASE}/api/conversations/${id}/read`,
   },
+  world: `${API_BASE}/api/world`,
   turn: `${API_BASE}/api/turn-credentials`,
   metrics: `${API_BASE}/api/metrics/call`,
   health: `${API_BASE}/health`,

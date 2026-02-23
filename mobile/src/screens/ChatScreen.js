@@ -10,10 +10,10 @@ import {
   FlatList,
   TouchableOpacity,
   StyleSheet,
-  KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
   Image,
+  Keyboard,
 } from "react-native";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
@@ -44,18 +44,45 @@ export default function ChatScreen({ route, navigation }) {
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isTyping, setIsTyping] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const flatListRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef(0);
 
   const isOnline = onlineUsers.has(otherUser.id);
 
+  // ─── Keyboard handling (Android fix) ──────────────────────────────────
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent =
+      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+      setTimeout(
+        () => flatListRef.current?.scrollToEnd({ animated: true }),
+        100,
+      );
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   // ─── Load message history ──────────────────────────────────────────────
   useEffect(() => {
     loadMessages();
     // Mark as read
     signalingClient.sendMessageRead(conversationId);
-    apiClient.post(endpoints.conversations.read(conversationId)).catch(() => {});
+    apiClient
+      .post(endpoints.conversations.read(conversationId))
+      .catch(() => {});
   }, [conversationId]);
 
   const loadMessages = async () => {
@@ -93,9 +120,7 @@ export default function ChatScreen({ route, navigation }) {
     const unsubConfirm = signalingClient.on("message-confirmed", (data) => {
       setMessages((prev) =>
         prev.map((m) =>
-          m.tempId === data.tempId
-            ? { ...data.message, confirmed: true }
-            : m,
+          m.tempId === data.tempId ? { ...data.message, confirmed: true } : m,
         ),
       );
     });
@@ -156,7 +181,7 @@ export default function ChatScreen({ route, navigation }) {
           <Text
             style={[
               styles.bubbleText,
-              isMine && styles.bubbleTextMine,
+              isMine ? styles.bubbleTextMine : styles.bubbleTextTheirs,
             ]}
           >
             {item.content}
@@ -166,7 +191,12 @@ export default function ChatScreen({ route, navigation }) {
               {formatMessageTime(item.created_at)}
             </Text>
             {item.pending && (
-              <Icon name="clock" size={10} color="rgba(255,255,255,0.5)" style={{ marginLeft: 4 }} />
+              <Icon
+                name="clock"
+                size={10}
+                color={colors.textMuted}
+                style={{ marginLeft: 4 }}
+              />
             )}
           </View>
         </View>
@@ -186,7 +216,7 @@ export default function ChatScreen({ route, navigation }) {
         </TouchableOpacity>
         <Image
           source={{
-            uri: `${AVATAR_BASE}${otherUser.avatar_seed || otherUser.name}`,
+            uri: `${AVATAR_BASE}${encodeURIComponent(otherUser.name)}`,
           }}
           style={styles.headerAvatar}
         />
@@ -197,6 +227,7 @@ export default function ChatScreen({ route, navigation }) {
           </Text>
         </View>
         <TouchableOpacity
+          style={{ marginLeft: 16 }}
           onPress={() => {
             signalingClient.requestCall(otherUser.id);
             const unsub = signalingClient.on("call-ringing", (data) => {
@@ -210,7 +241,7 @@ export default function ChatScreen({ route, navigation }) {
           }}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <Icon name="phone" size={22} color={colors.primary} />
+          <Icon name="phone" size={22} color={colors.textPrimary} />
         </TouchableOpacity>
         <TouchableOpacity
           style={{ marginLeft: 16 }}
@@ -227,15 +258,16 @@ export default function ChatScreen({ route, navigation }) {
           }}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
-          <Icon name="video" size={22} color={colors.primary} />
+          <Icon name="video" size={22} color={colors.textPrimary} />
         </TouchableOpacity>
       </View>
 
       {/* Messages */}
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-        keyboardVerticalOffset={0}
+      <View
+        style={[
+          { flex: 1 },
+          keyboardHeight > 0 && { paddingBottom: keyboardHeight },
+        ]}
       >
         {isLoading ? (
           <View style={styles.loadingContainer}>
@@ -298,11 +330,11 @@ export default function ChatScreen({ route, navigation }) {
             <Icon
               name="send"
               size={20}
-              color={inputText.trim() ? "#fff" : colors.textMuted}
+              color={inputText.trim() ? colors.textInverse : colors.textMuted}
             />
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+      </View>
     </View>
   );
 }
@@ -320,9 +352,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     paddingTop: 54,
     paddingBottom: 14,
-    backgroundColor: colors.bgCard,
+    backgroundColor: colors.bg,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(99,102,241,0.08)",
+    borderBottomColor: colors.border,
   },
   headerAvatar: {
     width: 40,
@@ -330,7 +362,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     marginLeft: 12,
     marginRight: 10,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: "transparent",
   },
   headerInfo: {
     flex: 1,
@@ -384,10 +416,12 @@ const styles = StyleSheet.create({
   bubbleText: {
     fontSize: 15,
     lineHeight: 21,
-    color: colors.textPrimary,
   },
   bubbleTextMine: {
-    color: "#fff",
+    color: colors.chatBubbleTextMine,
+  },
+  bubbleTextTheirs: {
+    color: colors.chatBubbleTextTheirs,
   },
   bubbleFooter: {
     flexDirection: "row",
@@ -397,7 +431,7 @@ const styles = StyleSheet.create({
   },
   bubbleTime: {
     fontSize: 11,
-    color: "rgba(153, 153, 179, 0.7)",
+    color: colors.textMuted,
   },
   bubbleTimeMine: {
     color: "rgba(255, 255, 255, 0.6)",
@@ -422,11 +456,11 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     backgroundColor: colors.inputBarBg,
     borderTopWidth: 1,
-    borderTopColor: "rgba(99,102,241,0.08)",
+    borderTopColor: colors.border,
   },
   textInput: {
     flex: 1,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: colors.bgCard,
     borderRadius: 24,
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -442,7 +476,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     justifyContent: "center",
     alignItems: "center",
-    ...shadows.md,
+    ...shadows.sm,
   },
   sendButtonDisabled: {
     backgroundColor: colors.bgElevated,

@@ -30,6 +30,7 @@ const memoryStore = {
   conversations: [],
   conversation_participants: [],
   messages: [],
+  world_messages: [],
 };
 
 /**
@@ -652,6 +653,48 @@ const db = {
     return memoryStore.conversation_participants
       .filter((p) => p.conversation_id === conversationId)
       .map((p) => p.user_id);
+  },
+
+  // ─── World Chat ──────────────────────────────────────────────────────────────
+  async createWorldMessage({ sender_id, sender_name, sender_avatar, content }) {
+    const { v4: uuidv4 } = require("uuid");
+    const msgId = uuidv4();
+    const now = new Date().toISOString();
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_messages")
+        .insert({ id: msgId, sender_id, sender_name, sender_avatar, content })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    const msg = { id: msgId, sender_id, sender_name, sender_avatar, content, created_at: now };
+    memoryStore.world_messages.push(msg);
+    // Keep only the last 500 messages in memory
+    if (memoryStore.world_messages.length > 500) {
+      memoryStore.world_messages = memoryStore.world_messages.slice(-500);
+    }
+    return msg;
+  },
+
+  async getWorldMessages(limit = 50, before = null) {
+    if (supabase) {
+      let query = supabase
+        .from("world_messages")
+        .select("id, sender_id, sender_name, sender_avatar, content, created_at")
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (before) query = query.lt("created_at", before);
+      const { data, error } = await query;
+      if (error) throw error;
+      return (data || []).reverse();
+    }
+    let msgs = [...memoryStore.world_messages];
+    if (before) msgs = msgs.filter((m) => m.created_at < before);
+    return msgs.slice(-limit);
   },
 
   async isConversationParticipant(conversationId, userId) {

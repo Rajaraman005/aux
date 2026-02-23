@@ -1,7 +1,7 @@
 /**
- * Design System — World-Class Theme.
- * Apple-level minimalism with glassmorphism depth.
- * Deep indigo-violet gradient palette, soft shadows, spring animations.
+ * Design System — Light Theme with color variables.
+ * White background, black text, easily swappable accent color.
+ * Change `primary` to update the accent color across the entire app.
  */
 import { StyleSheet, Dimensions } from "react-native";
 
@@ -9,25 +9,29 @@ const { width, height } = Dimensions.get("window");
 
 // ─── Color Palette ───────────────────────────────────────────────────────────
 export const colors = {
-  // Primary gradient
-  primary: "#6366f1",
-  primaryLight: "#818cf8",
-  primaryDark: "#4f46e5",
-  accent: "#8b5cf6",
-  accentLight: "#a78bfa",
+  // Primary accent — change this one value to re-theme the app
+  primary: "#000000",
+  primaryLight: "#333333",
+  primaryDark: "#000000",
+  accent: "#000000",
+  accentLight: "#333333",
 
-  // Backgrounds (deep dark)
-  bg: "#0a0a1a",
-  bgCard: "#12122a",
-  bgElevated: "#1a1a3e",
-  bgGlass: "rgba(26, 26, 62, 0.7)",
-  bgGlassBorder: "rgba(99, 102, 241, 0.15)",
+  // Backgrounds (light)
+  bg: "#FFFFFF",
+  bgCard: "#F5F5F5",
+  bgElevated: "#EBEBEB",
+  bgGlass: "rgba(245, 245, 245, 0.85)",
+  bgGlassBorder: "rgba(0, 0, 0, 0.08)",
 
-  // Text
-  textPrimary: "#f0f0ff",
-  textSecondary: "#9999b3",
-  textMuted: "#666680",
-  textInverse: "#0a0a1a",
+  // Text (dark on light)
+  textPrimary: "#000000",
+  textSecondary: "#666666",
+  textMuted: "#999999",
+  textInverse: "#FFFFFF",
+
+  // Borders
+  border: "rgba(0, 0, 0, 0.08)",
+  borderLight: "rgba(0, 0, 0, 0.04)",
 
   // Status
   success: "#10b981",
@@ -39,18 +43,20 @@ export const colors = {
 
   // Online indicator
   online: "#10b981",
-  offline: "#666680",
+  offline: "#CCCCCC",
   busy: "#f59e0b",
 
   // Chat
-  chatBubbleMine: "#6366f1",
-  chatBubbleTheirs: "#1a1a3e",
-  tabBarBg: "#12122a",
-  inputBarBg: "#12122a",
+  chatBubbleMine: "#000000",
+  chatBubbleTheirs: "#F0F0F0",
+  chatBubbleTextMine: "#FFFFFF",
+  chatBubbleTextTheirs: "#000000",
+  tabBarBg: "#FFFFFF",
+  inputBarBg: "#FFFFFF",
 
   // Overlay
-  overlay: "rgba(0, 0, 0, 0.6)",
-  overlayLight: "rgba(0, 0, 0, 0.3)",
+  overlay: "rgba(0, 0, 0, 0.5)",
+  overlayLight: "rgba(0, 0, 0, 0.2)",
 };
 
 // ─── Typography ──────────────────────────────────────────────────────────────
@@ -97,7 +103,7 @@ export const typography = {
     fontSize: 16,
     fontWeight: "700",
     letterSpacing: 0.3,
-    color: "#fff",
+    color: colors.textInverse,
   },
 };
 
@@ -121,46 +127,46 @@ export const radius = {
   full: 999,
 };
 
-// ─── Shadows (4-Level Elevation System) ──────────────────────────────────────
+// ─── Shadows ─────────────────────────────────────────────────────────────────
 export const shadows = {
   sm: {
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
     elevation: 2,
   },
   md: {
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
     elevation: 4,
   },
   lg: {
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.25,
-    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
     elevation: 8,
   },
   xl: {
-    shadowColor: "#6366f1",
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3,
-    shadowRadius: 24,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
     elevation: 12,
   },
   glow: {
-    shadowColor: "#6366f1",
+    shadowColor: colors.primary,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.4,
-    shadowRadius: 20,
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
     elevation: 10,
   },
 };
 
-// ─── Animation Configs (Spring-based for Material 3 fluidity) ────────────────
+// ─── Animation Configs ───────────────────────────────────────────────────────
 export const animations = {
   spring: {
     damping: 20,
@@ -202,7 +208,7 @@ export const commonStyles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
 
-  // Glassmorphism card
+  // Glass card
   glassCard: {
     backgroundColor: colors.bgGlass,
     borderRadius: radius.lg,
@@ -212,7 +218,7 @@ export const commonStyles = StyleSheet.create({
     ...shadows.md,
   },
 
-  // Primary gradient button
+  // Primary button
   primaryButton: {
     backgroundColor: colors.primary,
     borderRadius: radius.md,
@@ -220,11 +226,11 @@ export const commonStyles = StyleSheet.create({
     paddingHorizontal: spacing.xl,
     alignItems: "center",
     justifyContent: "center",
-    ...shadows.xl,
+    ...shadows.md,
   },
   primaryButtonText: {
     ...typography.button,
-    color: "#ffffff",
+    color: colors.textInverse,
   },
   primaryButtonDisabled: {
     backgroundColor: colors.bgElevated,
@@ -233,10 +239,10 @@ export const commonStyles = StyleSheet.create({
 
   // Input field
   input: {
-    backgroundColor: colors.bgElevated,
+    backgroundColor: colors.bgCard,
     borderRadius: radius.md,
     borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.1)",
+    borderColor: colors.border,
     paddingVertical: 14,
     paddingHorizontal: spacing.md,
     fontSize: 16,
@@ -244,7 +250,7 @@ export const commonStyles = StyleSheet.create({
   },
   inputFocused: {
     borderColor: colors.primary,
-    backgroundColor: colors.bgCard,
+    backgroundColor: colors.bg,
   },
   inputLabel: {
     ...typography.label,
@@ -262,7 +268,7 @@ export const commonStyles = StyleSheet.create({
   // Divider
   divider: {
     height: 1,
-    backgroundColor: "rgba(255, 255, 255, 0.06)",
+    backgroundColor: colors.border,
     marginVertical: spacing.md,
   },
 
@@ -279,7 +285,7 @@ export const commonStyles = StyleSheet.create({
   badgeText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#fff",
+    color: colors.textInverse,
   },
 });
 

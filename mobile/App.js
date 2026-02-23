@@ -4,7 +4,10 @@
  * Wraps in AuthProvider + SignalingProvider for global state.
  */
 import React, { useRef } from "react";
-import { NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
+import {
+  NavigationContainer,
+  createNavigationContainerRef,
+} from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
 import {
@@ -19,7 +22,10 @@ import {
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
-import { SignalingProvider, useSignaling } from "./src/context/SignalingContext";
+import {
+  SignalingProvider,
+  useSignaling,
+} from "./src/context/SignalingContext";
 import signalingClient from "./src/services/socket";
 import { colors, typography, shadows, spacing } from "./src/styles/theme";
 
@@ -34,6 +40,7 @@ import ChatScreen from "./src/screens/ChatScreen";
 import SearchScreen from "./src/screens/SearchScreen";
 import CallsScreen from "./src/screens/CallsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
+import WorldScreen from "./src/screens/WorldScreen";
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -68,7 +75,7 @@ function MainTabs() {
         headerShown: false,
         tabBarStyle: {
           backgroundColor: colors.tabBarBg,
-          borderTopColor: "rgba(99,102,241,0.08)",
+          borderTopColor: colors.border,
           borderTopWidth: 1,
           height: 80,
           paddingBottom: 20,
@@ -90,13 +97,20 @@ function MainTabs() {
         }}
       />
       <Tab.Screen
-        name="Search"
-        component={SearchScreen}
+        name="World"
+        component={View}
         options={{
+          tabBarLabel: "World",
           tabBarIcon: ({ color, size }) => (
-            <Icon name="search" size={size} color={color} />
+            <Icon name="globe" size={size} color={color} />
           ),
         }}
+        listeners={({ navigation }) => ({
+          tabPress: (e) => {
+            e.preventDefault();
+            navigation.navigate("WorldChat");
+          },
+        })}
       />
       <Tab.Screen
         name="NewAction"
@@ -105,7 +119,7 @@ function MainTabs() {
           tabBarLabel: "",
           tabBarIcon: () => (
             <View style={styles.fabButton}>
-              <Icon name="plus" size={28} color="#fff" />
+              <Icon name="plus" size={28} color={colors.textInverse} />
             </View>
           ),
         }}
@@ -153,6 +167,16 @@ function MainStack({ navigationRef }) {
           name="MainTabs"
           component={MainTabs}
           options={{ animation: "fade" }}
+        />
+        <Stack.Screen
+          name="Search"
+          component={SearchScreen}
+          options={{ animation: "slide_from_right" }}
+        />
+        <Stack.Screen
+          name="WorldChat"
+          component={WorldScreen}
+          options={{ animation: "slide_from_right" }}
         />
         <Stack.Screen
           name="Chat"
@@ -205,7 +229,7 @@ function IncomingCallOverlay({ navigationRef }) {
           <Icon
             name="phone-incoming"
             size={48}
-            color={colors.primary}
+            color={colors.success}
             style={{ marginBottom: spacing.md }}
           />
           <Text style={styles.incomingCallTitle}>Incoming Call</Text>
@@ -236,7 +260,7 @@ function IncomingCallOverlay({ navigationRef }) {
 function LoadingScreen() {
   return (
     <View style={styles.loading}>
-      <ActivityIndicator size="large" color="#1A1A2E" />
+      <ActivityIndicator size="large" color={colors.primary} />
     </View>
   );
 }
@@ -250,22 +274,17 @@ function RootNavigator() {
 
   return (
     <>
-      <StatusBar
-        barStyle={isAuthenticated ? "light-content" : "dark-content"}
-        backgroundColor={isAuthenticated ? colors.bg : "#FAFAFA"}
-      />
+      <StatusBar barStyle="dark-content" backgroundColor={colors.bg} />
       <NavigationContainer
         ref={navigationRef}
         theme={{
-          dark: isAuthenticated,
+          dark: false,
           colors: {
-            primary: isAuthenticated ? colors.primary : "#1A1A2E",
-            background: isAuthenticated ? colors.bg : "#FAFAFA",
-            card: isAuthenticated ? colors.bgCard : "#FFFFFF",
-            text: isAuthenticated ? colors.textPrimary : "#1A1A2E",
-            border: isAuthenticated
-              ? "rgba(99,102,241,0.08)"
-              : "#E5E5EA",
+            primary: colors.primary,
+            background: colors.bg,
+            card: colors.bgCard,
+            text: colors.textPrimary,
+            border: colors.border,
             notification: colors.error,
           },
           fonts: {
@@ -302,7 +321,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#FAFAFA",
+    backgroundColor: colors.bg,
   },
   fabButton: {
     width: 56,
@@ -312,18 +331,18 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginBottom: 20,
-    ...shadows.glow,
+    ...shadows.md,
   },
   // Incoming Call
   incomingCallOverlay: {
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "rgba(0,0,0,0.85)",
+    backgroundColor: colors.overlay,
   },
   incomingCallCard: {
     width: "80%",
-    backgroundColor: colors.bgCard,
+    backgroundColor: colors.bg,
     borderRadius: 24,
     padding: 32,
     alignItems: "center",

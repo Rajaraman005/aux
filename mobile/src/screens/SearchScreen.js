@@ -125,7 +125,7 @@ export default function SearchScreen({ navigation }) {
       >
         <View style={styles.avatarContainer}>
           <Image
-            source={{ uri: `${AVATAR_BASE}${item.avatar_seed || item.name}` }}
+            source={{ uri: `${AVATAR_BASE}${encodeURIComponent(item.name)}` }}
             style={styles.avatar}
           />
           <View
@@ -151,7 +151,11 @@ export default function SearchScreen({ navigation }) {
           onPress={() => isOnline && handleCallUser(item)}
           disabled={!isOnline}
         >
-          <Icon name="phone" size={18} color={isOnline ? colors.primary : colors.textMuted} />
+          <Icon
+            name="phone"
+            size={18}
+            color={isOnline ? colors.primary : colors.textMuted}
+          />
         </TouchableOpacity>
       </TouchableOpacity>
     );
@@ -246,7 +250,7 @@ export default function SearchScreen({ navigation }) {
               <>
                 <Image
                   source={{
-                    uri: `${AVATAR_BASE}${selectedUser.avatar_seed || selectedUser.name}`,
+                    uri: `${AVATAR_BASE}${encodeURIComponent(selectedUser.name)}`,
                   }}
                   style={styles.profileAvatar}
                 />
@@ -258,7 +262,7 @@ export default function SearchScreen({ navigation }) {
                     {
                       backgroundColor: onlineUsers.has(selectedUser.id)
                         ? "rgba(16, 185, 129, 0.1)"
-                        : "rgba(102, 102, 128, 0.1)",
+                        : "rgba(0, 0, 0, 0.05)",
                     },
                   ]}
                 >
@@ -292,7 +296,11 @@ export default function SearchScreen({ navigation }) {
                     style={styles.actionButton}
                     onPress={() => handleMessageUser(selectedUser)}
                   >
-                    <Icon name="message-circle" size={22} color="#fff" />
+                    <Icon
+                      name="message-circle"
+                      size={22}
+                      color={colors.textInverse}
+                    />
                     <Text style={styles.actionText}>Message</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -345,7 +353,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     paddingHorizontal: spacing.md,
     borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.08)",
+    borderColor: colors.border,
   },
   searchInput: {
     flex: 1,
@@ -377,7 +385,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
     marginBottom: spacing.sm,
     borderWidth: 1,
-    borderColor: "rgba(99,102,241,0.05)",
+    borderColor: colors.borderLight,
   },
   avatarContainer: {
     position: "relative",
@@ -387,7 +395,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: "transparent",
   },
   onlineDot: {
     position: "absolute",
@@ -414,7 +422,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: "rgba(99, 102, 241, 0.1)",
+    backgroundColor: colors.bgElevated,
     justifyContent: "center",
     alignItems: "center",
   },
@@ -442,12 +450,12 @@ const styles = StyleSheet.create({
   profileModal: {
     width: "85%",
     maxWidth: 340,
-    backgroundColor: colors.bgCard,
+    backgroundColor: colors.bg,
     borderRadius: radius.xl,
     padding: spacing.xl,
     alignItems: "center",
     borderWidth: 1,
-    borderColor: colors.bgGlassBorder,
+    borderColor: colors.border,
     ...shadows.xl,
   },
   profileAvatar: {
@@ -455,7 +463,7 @@ const styles = StyleSheet.create({
     height: 88,
     borderRadius: 44,
     marginBottom: spacing.md,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: "transparent",
   },
   profileName: {
     ...typography.h3,
@@ -498,7 +506,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "center",
     gap: 8,
-    ...shadows.md,
+    ...shadows.sm,
   },
   actionButtonCall: {
     backgroundColor: colors.success,

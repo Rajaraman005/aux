@@ -1,5 +1,5 @@
 /**
- * Home Screen — Dark-themed messenger chat list.
+ * Home Screen — Chat list.
  * Features: greeting header, filter tabs, conversation list with real-time updates.
  */
 import React, { useState, useEffect, useCallback } from "react";
@@ -19,13 +19,7 @@ import { useSignaling } from "../context/SignalingContext";
 import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import signalingClient from "../services/socket";
-import {
-  colors,
-  typography,
-  spacing,
-  radius,
-  shadows,
-} from "../styles/theme";
+import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -135,7 +129,9 @@ export default function HomeScreen({ navigation }) {
       >
         <View style={styles.avatarContainer}>
           <Image
-            source={{ uri: `${AVATAR_BASE}${item.other_user_avatar || item.other_user_name}` }}
+            source={{
+              uri: `${AVATAR_BASE}${encodeURIComponent(item.other_user_name)}`,
+            }}
             style={styles.avatar}
           />
           {isOnline && <View style={styles.onlineDot} />}
@@ -174,23 +170,29 @@ export default function HomeScreen({ navigation }) {
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <Text style={styles.greeting}>
-          Hey, {user?.name?.split(" ")[0]} {"\u{1F44B}"}
-        </Text>
-        <View style={styles.headerIcons}>
+        {/* Row 1: Title + grid icon */}
+        <View style={styles.headerRow}>
+          <Text style={styles.greeting}>Let's Aux</Text>
           <TouchableOpacity
-            onPress={() => navigation.navigate("Search")}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Icon name="search" size={22} color={colors.textPrimary} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={{ marginLeft: 18 }}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Icon name="grid" size={22} color={colors.textPrimary} />
           </TouchableOpacity>
         </View>
+        {/* Row 2: Search bar */}
+        <TouchableOpacity
+          style={styles.searchBar}
+          onPress={() => navigation.navigate("Search")}
+          activeOpacity={0.7}
+        >
+          <Icon
+            name="search"
+            size={18}
+            color={colors.textMuted}
+            style={{ marginRight: 8 }}
+          />
+          <Text style={styles.searchBarText}>Search...</Text>
+        </TouchableOpacity>
       </View>
 
       {/* Filter Tabs */}
@@ -237,11 +239,7 @@ export default function HomeScreen({ navigation }) {
           }
           ListEmptyComponent={
             <View style={styles.emptyContainer}>
-              <Icon
-                name="message-circle"
-                size={64}
-                color={colors.textMuted}
-              />
+              <Icon name="message-circle" size={64} color={colors.textMuted} />
               <Text style={styles.emptyTitle}>No conversations yet</Text>
               <Text style={styles.emptyText}>
                 Search for users and start chatting
@@ -266,12 +264,15 @@ const styles = StyleSheet.create({
     backgroundColor: colors.bg,
   },
   header: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: 60,
+    paddingBottom: spacing.sm,
+  },
+  headerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: spacing.lg,
-    paddingTop: 60,
-    paddingBottom: spacing.md,
+    marginBottom: spacing.md,
   },
   greeting: {
     fontSize: 28,
@@ -279,9 +280,19 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     letterSpacing: -0.3,
   },
-  headerIcons: {
+  searchBar: {
     flexDirection: "row",
     alignItems: "center",
+    backgroundColor: colors.bgCard,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchBarText: {
+    fontSize: 15,
+    color: colors.textMuted,
   },
 
   // Filter Tabs
@@ -306,7 +317,7 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
   },
   filterTextActive: {
-    color: "#fff",
+    color: colors.textInverse,
   },
 
   // Chat List
@@ -324,7 +335,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(255,255,255,0.04)",
+    borderBottomColor: colors.borderLight,
   },
   avatarContainer: {
     position: "relative",
@@ -334,7 +345,7 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: 26,
-    backgroundColor: colors.bgElevated,
+    backgroundColor: "transparent",
   },
   onlineDot: {
     position: "absolute",
@@ -383,7 +394,7 @@ const styles = StyleSheet.create({
   unreadText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#fff",
+    color: colors.textInverse,
   },
 
   // Empty State
@@ -405,7 +416,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     paddingVertical: 14,
     paddingHorizontal: 32,
-    ...shadows.xl,
+    ...shadows.md,
   },
   emptyButtonText: {
     ...typography.button,

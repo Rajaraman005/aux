@@ -680,8 +680,8 @@ export default function CallScreen({ route, navigation }) {
               borderColor: glowAnim.interpolate({
                 inputRange: [0, 1],
                 outputRange: [
-                  "rgba(99, 102, 241, 0.3)",
-                  "rgba(139, 92, 246, 0.7)",
+                  "rgba(253, 214, 61, 0.3)",
+                  "rgba(253, 214, 61, 0.7)",
                 ],
               }),
             },
@@ -850,7 +850,7 @@ export default function CallScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#050510",
+    backgroundColor: "#050508",
   },
 
   // ─── Top Bar ───────────────────────────────────────────────────────
@@ -927,11 +927,11 @@ const styles = StyleSheet.create({
   },
   remoteVideo: {
     flex: 1,
-    backgroundColor: "#0a0a1a",
+    backgroundColor: "#0a0a0f",
   },
   remoteVideoPlaceholder: {
     flex: 1,
-    backgroundColor: "#0a0a1a",
+    backgroundColor: "#0a0a0f",
     justifyContent: "center",
     alignItems: "center",
   },
@@ -939,11 +939,11 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    backgroundColor: "rgba(253, 214, 61, 0.1)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(99, 102, 241, 0.25)",
+    borderColor: "rgba(253, 214, 61, 0.2)",
   },
   placeholderAvatarText: {
     fontSize: 32,
@@ -979,17 +979,17 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#050510",
+    backgroundColor: "#050508",
   },
   avatarCircle: {
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: "rgba(99, 102, 241, 0.12)",
+    backgroundColor: "rgba(253, 214, 61, 0.08)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(99, 102, 241, 0.25)",
+    borderColor: "rgba(253, 214, 61, 0.2)",
     marginBottom: 20,
   },
   avatarInitial: {
@@ -1032,7 +1032,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: "center",
     alignItems: "center",
-    backgroundColor: "#050510",
+    backgroundColor: "#050508",
   },
   pulseRing: {
     position: "absolute",
@@ -1046,11 +1046,11 @@ const styles = StyleSheet.create({
     width: 100,
     height: 100,
     borderRadius: 50,
-    backgroundColor: "rgba(99, 102, 241, 0.15)",
+    backgroundColor: "rgba(253, 214, 61, 0.1)",
     justifyContent: "center",
     alignItems: "center",
     borderWidth: 2,
-    borderColor: "rgba(99, 102, 241, 0.35)",
+    borderColor: "rgba(253, 214, 61, 0.25)",
     marginBottom: 16,
     zIndex: 1,
   },
@@ -1095,11 +1095,11 @@ const styles = StyleSheet.create({
     zIndex: 10,
     paddingTop: 16,
     paddingHorizontal: 16,
-    backgroundColor: "rgba(12, 12, 32, 0.85)",
+    backgroundColor: "rgba(10, 10, 15, 0.85)",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
     borderTopWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.12)",
+    borderColor: "rgba(255, 255, 255, 0.06)",
   },
   controlBarInner: {
     alignItems: "center",
@@ -1123,8 +1123,8 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.06)",
   },
   controlBtnActive: {
-    backgroundColor: "rgba(99, 102, 241, 0.25)",
-    borderColor: "rgba(99, 102, 241, 0.4)",
+    backgroundColor: "rgba(253, 214, 61, 0.15)",
+    borderColor: "rgba(253, 214, 61, 0.3)",
   },
   controlBtnDanger: {
     backgroundColor: "rgba(239, 68, 68, 0.2)",
@@ -1185,11 +1185,11 @@ const styles = StyleSheet.create({
     zIndex: 15,
   },
   statsCard: {
-    backgroundColor: "rgba(12, 12, 32, 0.92)",
+    backgroundColor: "rgba(10, 10, 15, 0.92)",
     borderRadius: 16,
     padding: 16,
     borderWidth: 1,
-    borderColor: "rgba(99, 102, 241, 0.15)",
+    borderColor: "rgba(255, 255, 255, 0.08)",
     minWidth: 200,
   },
   statsTitle: {
