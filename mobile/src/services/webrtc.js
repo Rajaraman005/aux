@@ -101,6 +101,7 @@ class WebRTCEngine {
     this._pendingOffer = null;
     this._pendingAnswer = null;
     this._initialized = false;
+    this._remoteDescriptionSet = false; // ★ Guard: ICE candidates only after setRemoteDescription
 
     // ★ Call State Machine
     this._callState = CALL_STATES.IDLE;
@@ -281,11 +282,8 @@ class WebRTCEngine {
     // ─── Background Mode Handling ─────────────────────────────────────
     this._setupAppStateHandler();
 
-    // ─── Process queued ICE candidates ────────────────────────────────
-    while (this.iceCandidateQueue.length > 0) {
-      const candidate = this.iceCandidateQueue.shift();
-      await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
-    }
+    // ★ FIX: Do NOT drain ICE candidates here — they must wait for setRemoteDescription.
+    //    ICE candidates are drained in handleOffer()/handleAnswer() after setRemoteDescription.
 
     this._initialized = true;
 
@@ -392,6 +390,7 @@ class WebRTCEngine {
     }
     const desc = new RTCSessionDescription(sdp);
     await this.pc.setRemoteDescription(desc);
+    this._remoteDescriptionSet = true; // ★ Now safe to add ICE candidates
     // ★ Drain queued ICE candidates now that remoteDescription is set
     await this._drainIceCandidateQueue();
     const answer = await this.pc.createAnswer();
@@ -409,12 +408,15 @@ class WebRTCEngine {
     }
     const desc = new RTCSessionDescription(sdp);
     await this.pc.setRemoteDescription(desc);
+    this._remoteDescriptionSet = true; // ★ Now safe to add ICE candidates
     // ★ Drain queued ICE candidates now that remoteDescription is set
     await this._drainIceCandidateQueue();
   }
 
   async handleIceCandidate(candidate) {
-    if (!this.pc || !this.pc.remoteDescription) {
+    // ★ FIX: Use explicit flag instead of checking remoteDescription object
+    //    remoteDescription can be truthy but incomplete during negotiation
+    if (!this.pc || !this._remoteDescriptionSet) {
       this.iceCandidateQueue.push(candidate);
       return;
     }
@@ -789,6 +791,7 @@ class WebRTCEngine {
     this._isBackgrounded = false;
     this._iceRestartAttempts = 0;
     this._initialized = false;
+    this._remoteDescriptionSet = false;
     this._pendingOffer = null;
     this._pendingAnswer = null;
 

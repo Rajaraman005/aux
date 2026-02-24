@@ -16,6 +16,7 @@ const redisBridge = require("./signaling/redis");
 const presence = require("./signaling/presence");
 const metrics = require("./services/metrics");
 const { pushMetrics } = require("./services/pushService");
+const fcmService = require("./services/fcmService");
 
 const app = express();
 const server = http.createServer(app);
@@ -79,6 +80,7 @@ app.get("/health", (req, res) => {
     connections: presence.getLocalConnectionCount(),
     redis: redisBridge.isConnected,
     push: pushMetrics.getStats(),
+    fcm: fcmService.diagnose(), // ★ Full FCM diagnostic state
     timestamp: new Date().toISOString(),
   });
 });
@@ -105,26 +107,34 @@ app.post("/api/metrics/call", express.json(), (req, res) => {
   res.json({ received: true });
 });
 
-// ─── TURN Credentials (time-limited HMAC) ────────────────────────────────────
+// ─── ICE Server Credentials (Metered.ca TURN) ───────────────────────────────
 app.get("/api/turn-credentials", (req, res) => {
-  const crypto = require("crypto");
-  const ttl = config.turn.ttl;
-  const username = `${Math.floor(Date.now() / 1000) + ttl}:videocall`;
-  const hmac = crypto.createHmac("sha1", config.turn.secret);
-  hmac.update(username);
-  const credential = hmac.digest("base64");
-
   res.json({
     iceServers: [
+      { urls: "stun:stun.relay.metered.ca:80" },
       { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
       {
-        urls: config.turn.url,
-        username,
-        credential,
+        urls: "turn:global.relay.metered.ca:80",
+        username: "40e7863b297fb9c3ad752855",
+        credential: "/ZKqRLSXQu2ynNyF",
+      },
+      {
+        urls: "turn:global.relay.metered.ca:80?transport=tcp",
+        username: "40e7863b297fb9c3ad752855",
+        credential: "/ZKqRLSXQu2ynNyF",
+      },
+      {
+        urls: "turn:global.relay.metered.ca:443",
+        username: "40e7863b297fb9c3ad752855",
+        credential: "/ZKqRLSXQu2ynNyF",
+      },
+      {
+        urls: "turns:global.relay.metered.ca:443?transport=tcp",
+        username: "40e7863b297fb9c3ad752855",
+        credential: "/ZKqRLSXQu2ynNyF",
       },
     ],
-    ttl,
+    ttl: 86400,
   });
 });
 
@@ -161,6 +171,21 @@ async function start() {
     console.log(
       `   Redis:       ${redisBridge.isConnected ? "✅ Connected" : "⚠️  In-Memory Fallback"}`,
     );
+    console.log(
+      `   FCM:         ${fcmService.isConfigured() ? "✅ Configured" : "⚠️  Not Configured"}`,
+    );
+
+    // ★ TURN server production warning
+    if (!config.isDev && config.turn.url.includes("localhost")) {
+      console.warn(
+        `\n⚠️  WARNING: TURN_SERVER_URL points to localhost in production!`,
+      );
+      console.warn(`   Calls will fail behind symmetric NATs (~30% of users).`);
+      console.warn(
+        `   Set TURN_SERVER_URL to a real coturn/Twilio/Xirsys TURN server.\n`,
+      );
+    }
+
     console.log(`${"═".repeat(50)}\n`);
 
     // ─── Daily Notification Cleanup (90-day expiration) ────────────────

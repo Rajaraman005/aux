@@ -73,15 +73,22 @@ function loadServiceAccount() {
   }
 
   try {
-    const raw = fs.readFileSync(saPath, "utf8");
+    // ★ Resolve path relative to CWD for platform-safe loading
+    const path = require("path");
+    const resolved = path.resolve(saPath);
+    console.log(`📋 FCM: Loading service account from: ${resolved}`);
+    const raw = fs.readFileSync(resolved, "utf8");
     serviceAccount = JSON.parse(raw);
     console.log(
       `✅ FCM: Service account loaded (project: ${serviceAccount.project_id})`,
     );
     return serviceAccount;
   } catch (err) {
-    console.warn(
-      `⚠️  FCM: Failed to load service account from ${saPath}: ${err.message}`,
+    console.error(
+      `❌ FCM: Failed to load service account from ${saPath}: ${err.message}`,
+    );
+    console.error(
+      `   ★ Check FCM_SERVICE_ACCOUNT_PATH in .env — must be relative to server/ directory`,
     );
     return null;
   }
@@ -333,10 +340,32 @@ function isConfigured() {
   return !!(config.fcm?.projectId && loadServiceAccount());
 }
 
+/**
+ * ★ Diagnostic function — returns full FCM configuration state.
+ * Useful for /health endpoint and debugging push issues.
+ */
+function diagnose() {
+  const sa = loadServiceAccount();
+  return {
+    configured: isConfigured(),
+    projectId: config.fcm?.projectId || null,
+    serviceAccountPath: config.fcm?.serviceAccountPath || null,
+    serviceAccountLoaded: !!sa,
+    serviceAccountProject: sa?.project_id || null,
+    projectMatch:
+      sa?.project_id && config.fcm?.projectId
+        ? sa.project_id === config.fcm.projectId
+        : null,
+    cachedTokenValid: !!(cachedAccessToken && Date.now() < tokenExpiresAt),
+    metrics: fcmMetrics.getStats(),
+  };
+}
+
 module.exports = {
   sendPush,
   sendToDevices,
   buildMessage,
   isConfigured,
+  diagnose,
   fcmMetrics,
 };

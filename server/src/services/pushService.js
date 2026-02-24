@@ -228,9 +228,19 @@ async function sendMessagePush(recipientId, senderName, messagePreview) {
 
 /**
  * Send high-priority push for incoming call.
- * Sends even if online (for wake-up on locked screen).
+ * ★ FIX: ALWAYS sends, even if user is online — needed for background/locked screen wake-up.
+ *    Unlike message pushes, call pushes must bypass the online check because:
+ *    1. App may be backgrounded (WS still connected, but screen locked)
+ *    2. Push is the only way to trigger full-screen incoming call on Android
+ *    3. Call pushes have their own rate limiting (2 per 10s)
  */
-async function sendCallPush(targetUserId, callerId, callerName, callId, callType = "video") {
+async function sendCallPush(
+  targetUserId,
+  callerId,
+  callerName,
+  callId,
+  callType = "video",
+) {
   if (isRateLimited(targetUserId, "call")) return;
 
   const allowed = await isPushAllowed(targetUserId, "call");

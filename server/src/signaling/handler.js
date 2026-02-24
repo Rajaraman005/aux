@@ -93,6 +93,7 @@ function initializeSignaling(wss) {
     );
 
     // ─── Heartbeat ──────────────────────────────────────────────────────
+    // ★ Heartbeat every 25s — 3.6× safety margin against 90s Redis TTL
     const heartbeatInterval = setInterval(async () => {
       if (ws.readyState === 1) {
         ws.ping();
@@ -100,7 +101,7 @@ function initializeSignaling(wss) {
       } else {
         clearInterval(heartbeatInterval);
       }
-    }, 30000);
+    }, 25000);
 
     // ─── Message Handler ────────────────────────────────────────────────
     ws.on("message", async (raw) => {
@@ -148,6 +149,9 @@ function initializeSignaling(wss) {
             break;
           case "call-mode-switch":
             await handleCallModeSwitch(userId, message);
+            break;
+          case "call-rejoin":
+            await handleCallRejoin(userId, message, ws);
             break;
           case "call-metrics":
             await handleCallMetrics(message);
@@ -262,6 +266,11 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     metrics.callFailures.inc({ reason: "user_offline" });
     return;
   }
+
+  // ★ ALWAYS send call push even when online — needed for background/locked screen wake-up
+  sendCallPush(targetUserId, callerId, callerName, uuidv4(), callType).catch(
+    (err) => console.error("Call push error (non-blocking):", err.message),
+  );
 
   // Check if either party is already in a call
   for (const [, call] of activeCalls) {
@@ -385,7 +394,8 @@ async function handleOffer(userId, message) {
   const { callId, sdp } = message;
   const call = activeCalls.get(callId);
 
-  if (!call) return;
+  // ★ Validate: only forward offer in connecting/active states
+  if (!call || call.state === "ended" || call.state === "ringing") return;
 
   const targetId = call.callerId === userId ? call.calleeId : call.callerId;
   await presence.sendToUser(targetId, {
@@ -400,7 +410,8 @@ async function handleAnswer(userId, message) {
   const { callId, sdp } = message;
   const call = activeCalls.get(callId);
 
-  if (!call) return;
+  // ★ Validate: only accept answer when connecting
+  if (!call || call.state === "ended") return;
 
   call.state = "active";
 
@@ -491,6 +502,52 @@ function handleCallStatus(message, ws) {
       state: call?.state || "not_found",
     }),
   );
+}
+
+// ★ Call Rejoin — Client reconnected WebSocket mid-call
+async function handleCallRejoin(userId, message, ws) {
+  const { callId } = message;
+  const call = activeCalls.get(callId);
+
+  if (!call || call.state === "ended") {
+    ws.send(
+      JSON.stringify({
+        type: "call-rejoin-response",
+        callId,
+        success: false,
+        reason: "call_not_found",
+      }),
+    );
+    return;
+  }
+
+  // Verify user is part of this call
+  if (call.callerId !== userId && call.calleeId !== userId) {
+    ws.send(
+      JSON.stringify({
+        type: "call-rejoin-response",
+        callId,
+        success: false,
+        reason: "not_participant",
+      }),
+    );
+    return;
+  }
+
+  // ★ Re-register presence so signaling messages route to the new WS
+  await presence.userConnected(userId, ws);
+
+  ws.send(
+    JSON.stringify({
+      type: "call-rejoin-response",
+      callId,
+      success: true,
+      state: call.state,
+      callType: call.callType,
+    }),
+  );
+
+  console.log(`🔄 ${userId} rejoined call ${callId} (state: ${call.state})`);
 }
 
 async function handleCallMetrics(message) {
