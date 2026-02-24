@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "647921858196",
+    "project_id": "auxnotifys",
+    "storage_bucket": "auxnotifys.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:647921858196:android:8043af8005644aa5c9e681",
+        "android_client_info": {
+          "package_name": "com.aux.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDwxAQySblVu9vTvXtrBY99BwCqxwbjze4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
