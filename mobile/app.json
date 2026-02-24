@@ -24,7 +24,7 @@
       "adaptiveIcon": {
         "backgroundColor": "#0a0a1a"
       },
-      "package": "com.aux.app",
+      "package": "com.auxi.app",
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "android.permission.CAMERA",
