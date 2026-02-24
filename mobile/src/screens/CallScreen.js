@@ -25,6 +25,7 @@ import {
   Platform,
   StatusBar,
   Vibration,
+  Image,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
@@ -91,8 +92,14 @@ const QUALITY_BARS = {
 };
 
 export default function CallScreen({ route, navigation }) {
-  const { callerName } = route.params;
+  const {
+    callerName,
+    callerAvatar,
+    callType = "video",
+    acceptFromNotification = false,
+  } = route.params;
   const insets = useSafeAreaInsets();
+  const isVoiceCall = callType === "voice";
 
   // ─── State (all driven by CallManager events) ──────────────────────────────
   const [localStream, setLocalStream] = useState(null);
@@ -101,8 +108,9 @@ export default function CallScreen({ route, navigation }) {
     callManager.state || CALL_MANAGER_STATES.CALLING,
   );
   const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOff, setIsCameraOff] = useState(false);
-  const [isAudioOnly, setIsAudioOnly] = useState(false);
+  const [isCameraOff, setIsCameraOff] = useState(isVoiceCall);
+  const [isAudioOnly, setIsAudioOnly] = useState(isVoiceCall);
+  const [currentCallType, setCurrentCallType] = useState(callType);
   const [duration, setDuration] = useState(0);
   const [qualityTier, setQualityTier] = useState(QUALITY_TIERS.EXCELLENT);
   const [stats, setStats] = useState(null);
@@ -186,9 +194,20 @@ export default function CallScreen({ route, navigation }) {
       haptic("light");
     });
 
+    // ★ Bootstrap from notification accept (app was backgrounded/killed)
+    if (acceptFromNotification && !callManager.isActive) {
+      const pendingCall = callManager.getPendingIncomingCall?.();
+      if (pendingCall) {
+        callManager.acceptIncomingCall(pendingCall);
+      }
+    }
+
     // ★ Subscribe to mode switches
     const unsubMode = callManager.on("modeSwitch", ({ mode }) => {
-      setIsAudioOnly(mode === "audio_only");
+      const audioOnly = mode === "audio_only";
+      setIsAudioOnly(audioOnly);
+      setCurrentCallType(audioOnly ? "voice" : "video");
+      setIsCameraOff(audioOnly);
       haptic("medium");
     });
 
@@ -380,6 +399,17 @@ export default function CallScreen({ route, navigation }) {
     callManager.switchCamera();
   };
 
+  const handleSwitchCallType = () => {
+    haptic("medium");
+    const newType = currentCallType === "voice" ? "video" : "voice";
+    const switched = callManager.switchCallType(newType);
+    if (switched) {
+      setCurrentCallType(newType);
+      setIsAudioOnly(newType === "voice");
+      setIsCameraOff(newType === "voice");
+    }
+  };
+
   // ─── Toggle Controls Visibility ─────────────────────────────────────────────
   const toggleControls = useCallback(() => {
     const toValue = controlsVisible ? 0 : 1;
@@ -501,9 +531,16 @@ export default function CallScreen({ route, navigation }) {
   const renderConnectingState = () => (
     <View style={styles.centerOverlay}>
       <View style={styles.avatarCircle}>
-        <Text style={styles.avatarInitial}>
-          {(callerName || "?").charAt(0).toUpperCase()}
-        </Text>
+        {callerAvatar?.startsWith("http") ? (
+          <Image
+            source={{ uri: callerAvatar }}
+            style={{ width: 100, height: 100, borderRadius: 50 }}
+          />
+        ) : (
+          <Text style={styles.avatarInitial}>
+            {(callerName || "?").charAt(0).toUpperCase()}
+          </Text>
+        )}
       </View>
       <Text style={styles.callerNameLarge}>{callerName || "Unknown"}</Text>
       <View style={styles.dotsRow}>
@@ -567,9 +604,16 @@ export default function CallScreen({ route, navigation }) {
       ))}
 
       <View style={styles.audioAvatar}>
-        <Text style={styles.audioAvatarText}>
-          {(callerName || "?").charAt(0).toUpperCase()}
-        </Text>
+        {callerAvatar?.startsWith("http") ? (
+          <Image
+            source={{ uri: callerAvatar }}
+            style={{ width: 140, height: 140, borderRadius: 70 }}
+          />
+        ) : (
+          <Text style={styles.audioAvatarText}>
+            {(callerName || "?").charAt(0).toUpperCase()}
+          </Text>
+        )}
       </View>
 
       <Text style={styles.audioCallerName}>{callerName || "Unknown"}</Text>
@@ -595,7 +639,7 @@ export default function CallScreen({ route, navigation }) {
         ))}
       </View>
 
-      <Text style={styles.audioModeLabel}>Audio Only</Text>
+      <Text style={styles.audioModeLabel}>Voice Call</Text>
     </View>
   );
 
@@ -612,9 +656,16 @@ export default function CallScreen({ route, navigation }) {
       ) : (
         <View style={styles.remoteVideoPlaceholder}>
           <View style={styles.placeholderAvatar}>
-            <Text style={styles.placeholderAvatarText}>
-              {(callerName || "?").charAt(0).toUpperCase()}
-            </Text>
+            {callerAvatar?.startsWith("http") ? (
+              <Image
+                source={{ uri: callerAvatar }}
+                style={{ width: 80, height: 80, borderRadius: 40 }}
+              />
+            ) : (
+              <Text style={styles.placeholderAvatarText}>
+                {(callerName || "?").charAt(0).toUpperCase()}
+              </Text>
+            )}
           </View>
           <Text style={styles.waitingText}>Waiting for video...</Text>
         </View>
@@ -675,9 +726,16 @@ export default function CallScreen({ route, navigation }) {
 
           <View style={styles.callerInfo}>
             <View style={styles.avatarSmall}>
-              <Text style={styles.avatarSmallText}>
-                {(callerName || "?").charAt(0).toUpperCase()}
-              </Text>
+              {callerAvatar?.startsWith("http") ? (
+                <Image
+                  source={{ uri: callerAvatar }}
+                  style={{ width: 44, height: 44, borderRadius: 22 }}
+                />
+              ) : (
+                <Text style={styles.avatarSmallText}>
+                  {(callerName || "?").charAt(0).toUpperCase()}
+                </Text>
+              )}
             </View>
             <View style={styles.callerDetails}>
               <Text style={styles.topCallerName} numberOfLines={1}>
@@ -685,7 +743,7 @@ export default function CallScreen({ route, navigation }) {
               </Text>
               <View style={styles.timerRow}>
                 <Icon
-                  name="phone"
+                  name={currentCallType === "voice" ? "phone" : "video"}
                   size={11}
                   color={isConnected ? "#10b981" : "rgba(255,255,255,0.5)"}
                 />
@@ -794,17 +852,28 @@ export default function CallScreen({ route, navigation }) {
         pointerEvents={controlsVisible ? "auto" : "none"}
       >
         <View style={styles.controlRow}>
-          <TouchableOpacity
-            style={[styles.controlBtn, isCameraOff && styles.controlBtnActive]}
-            onPress={toggleCamera}
-            activeOpacity={0.7}
-          >
-            <Icon
-              name={isCameraOff ? "video-off" : "video"}
-              size={22}
-              color="#fff"
-            />
-          </TouchableOpacity>
+          {/* Camera toggle — only shown for video calls */}
+          {currentCallType === "video" ? (
+            <TouchableOpacity
+              style={[styles.controlBtn, isCameraOff && styles.controlBtnActive]}
+              onPress={toggleCamera}
+              activeOpacity={0.7}
+            >
+              <Icon
+                name={isCameraOff ? "video-off" : "video"}
+                size={22}
+                color="#fff"
+              />
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+              onPress={toggleMute}
+              activeOpacity={0.7}
+            >
+              <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+            </TouchableOpacity>
+          )}
 
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
@@ -816,14 +885,45 @@ export default function CallScreen({ route, navigation }) {
             </TouchableOpacity>
           </Animated.View>
 
-          <TouchableOpacity
-            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
-            onPress={toggleMute}
-            activeOpacity={0.7}
-          >
-            <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
-          </TouchableOpacity>
+          {/* Switch call type — voice↔video (WhatsApp-style) */}
+          {isConnected ? (
+            <TouchableOpacity
+              style={[styles.controlBtn, styles.switchModeBtn]}
+              onPress={handleSwitchCallType}
+              activeOpacity={0.7}
+            >
+              <Icon
+                name={currentCallType === "voice" ? "video" : "phone"}
+                size={20}
+                color="#fff"
+              />
+              <Text style={styles.switchModeLabel}>
+                {currentCallType === "voice" ? "Video" : "Audio"}
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+              onPress={toggleMute}
+              activeOpacity={0.7}
+            >
+              <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+            </TouchableOpacity>
+          )}
         </View>
+
+        {/* Secondary row — mute for video mode when connected */}
+        {currentCallType === "video" && isConnected && (
+          <View style={styles.secondaryControlRow}>
+            <TouchableOpacity
+              style={[styles.controlBtnSmall, isMuted && styles.controlBtnActive]}
+              onPress={toggleMute}
+              activeOpacity={0.7}
+            >
+              <Icon name={isMuted ? "mic-off" : "mic"} size={18} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        )}
       </Animated.View>
     </Animated.View>
   );
@@ -1175,6 +1275,33 @@ const styles = StyleSheet.create({
   controlBtnActive: {
     backgroundColor: "rgba(239, 68, 68, 0.2)",
     borderColor: "rgba(239, 68, 68, 0.3)",
+  },
+
+  // ─── Switch Mode Button ──────────────────────────────────────────
+  switchModeBtn: {
+    paddingHorizontal: 2,
+  },
+  switchModeLabel: {
+    fontSize: 9,
+    color: "rgba(255,255,255,0.6)",
+    fontWeight: "600",
+    marginTop: 2,
+    letterSpacing: 0.3,
+  },
+  secondaryControlRow: {
+    flexDirection: "row",
+    justifyContent: "center",
+    marginTop: 12,
+  },
+  controlBtnSmall: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.06)",
   },
 
   // ─── End Call Button ──────────────────────────────────────────────

@@ -34,6 +34,8 @@ const memoryStore = {
   push_tokens: [],
   friend_requests: [],
   notifications: [],
+  user_devices: [],
+  notification_preferences: [],
 };
 
 /**
@@ -89,7 +91,7 @@ const db = {
       const { data, error } = await supabase
         .from("users")
         .select(
-          "id, name, email, phone, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+          "id, name, email, phone, bio, avatar_seed, avatar_url, email_verified, is_private, secret_name, created_at",
         )
         .eq("id", id)
         .single();
@@ -171,7 +173,9 @@ const db = {
     if (supabase) {
       const { data, error } = await supabase
         .from("users")
-        .select("id, name, email, bio, avatar_seed, is_private, created_at")
+        .select(
+          "id, name, email, bio, avatar_seed, avatar_url, is_private, created_at",
+        )
         .eq("email_verified", true)
         .or("is_private.is.null,is_private.eq.false")
         .range(offset, offset + limit - 1)
@@ -494,7 +498,7 @@ const db = {
       const otherUserIds = [...new Set((allParts || []).map((p) => p.user_id))];
       const { data: otherUsers, error: err3 } = await supabase
         .from("users")
-        .select("id, name, avatar_seed")
+        .select("id, name, avatar_seed, avatar_url")
         .in("id", otherUserIds);
       if (err3) throw err3;
 
@@ -514,7 +518,7 @@ const db = {
         // Get last message
         const { data: msgs } = await supabase
           .from("messages")
-          .select("content, created_at, sender_id")
+          .select("content, created_at, sender_id, media_type")
           .eq("conversation_id", convId)
           .order("created_at", { ascending: false })
           .limit(1);
@@ -533,7 +537,9 @@ const db = {
           other_user_id: otherUser.id,
           other_user_name: otherUser.name,
           other_user_avatar: otherUser.avatar_seed,
+          other_user_avatar_url: otherUser.avatar_url || null,
           last_message: lastMsg?.content || null,
+          last_message_media_type: lastMsg?.media_type || null,
           last_message_at: lastMsg?.created_at || null,
           last_message_sender: lastMsg?.sender_id || null,
           unread_count: unreadCount || 0,
@@ -579,7 +585,9 @@ const db = {
         other_user_id: otherUser.id,
         other_user_name: otherUser.name,
         other_user_avatar: otherUser.avatar_seed,
+        other_user_avatar_url: otherUser.avatar_url || null,
         last_message: lastMsg?.content || null,
+        last_message_media_type: lastMsg?.media_type || null,
         last_message_at: lastMsg?.created_at || null,
         last_message_sender: lastMsg?.sender_id || null,
         unread_count: unreadCount,
@@ -599,7 +607,9 @@ const db = {
     if (supabase) {
       const { data, error } = await supabase
         .from("messages")
-        .select("id, conversation_id, sender_id, content, created_at, read_at")
+        .select(
+          "id, conversation_id, sender_id, content, created_at, read_at, media_url, media_type, media_thumbnail, media_width, media_height, media_duration, media_size, media_mime_type",
+        )
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: false })
         .range(offset, offset + limit - 1);
@@ -612,15 +622,47 @@ const db = {
       .slice(offset, offset + limit);
   },
 
-  async createMessage({ conversation_id, sender_id, content }) {
+  async createMessage({
+    conversation_id,
+    sender_id,
+    content,
+    media_url,
+    media_type,
+    media_thumbnail,
+    media_width,
+    media_height,
+    media_duration,
+    media_size,
+    media_mime_type,
+  }) {
     const { v4: uuidv4 } = require("uuid");
     const msgId = uuidv4();
     const now = new Date().toISOString();
 
+    // Base row (always works even without media columns)
+    const row = {
+      id: msgId,
+      conversation_id,
+      sender_id,
+      content: content || null,
+    };
+
+    // Only add media fields if media is actually present
+    if (media_url) {
+      row.media_url = media_url;
+      row.media_type = media_type || null;
+      row.media_thumbnail = media_thumbnail || null;
+      row.media_width = media_width || null;
+      row.media_height = media_height || null;
+      row.media_duration = media_duration || null;
+      row.media_size = media_size || null;
+      row.media_mime_type = media_mime_type || null;
+    }
+
     if (supabase) {
       const { data, error } = await supabase
         .from("messages")
-        .insert({ id: msgId, conversation_id, sender_id, content })
+        .insert(row)
         .select()
         .single();
       if (error) throw error;
@@ -634,14 +676,7 @@ const db = {
       return data;
     }
 
-    const msg = {
-      id: msgId,
-      conversation_id,
-      sender_id,
-      content,
-      created_at: now,
-      read_at: null,
-    };
+    const msg = { ...row, created_at: now, read_at: null };
     memoryStore.messages.push(msg);
 
     const conv = memoryStore.conversations.find(
@@ -690,31 +725,57 @@ const db = {
   },
 
   // ─── World Chat ──────────────────────────────────────────────────────────────
-  async createWorldMessage({ sender_id, sender_name, sender_avatar, content }) {
+  async createWorldMessage({
+    sender_id,
+    sender_name,
+    sender_avatar,
+    content,
+    media_url,
+    media_type,
+    media_thumbnail,
+    media_width,
+    media_height,
+    media_duration,
+    media_size,
+    media_mime_type,
+  }) {
     const { v4: uuidv4 } = require("uuid");
     const msgId = uuidv4();
     const now = new Date().toISOString();
 
+    // Base row
+    const row = {
+      id: msgId,
+      sender_id,
+      sender_name,
+      sender_avatar,
+      content: content || null,
+    };
+
+    // Only add media fields if media is actually present
+    if (media_url) {
+      row.media_url = media_url;
+      row.media_type = media_type || null;
+      row.media_thumbnail = media_thumbnail || null;
+      row.media_width = media_width || null;
+      row.media_height = media_height || null;
+      row.media_duration = media_duration || null;
+      row.media_size = media_size || null;
+      row.media_mime_type = media_mime_type || null;
+    }
+
     if (supabase) {
       const { data, error } = await supabase
         .from("world_messages")
-        .insert({ id: msgId, sender_id, sender_name, sender_avatar, content })
+        .insert(row)
         .select()
         .single();
       if (error) throw error;
       return data;
     }
 
-    const msg = {
-      id: msgId,
-      sender_id,
-      sender_name,
-      sender_avatar,
-      content,
-      created_at: now,
-    };
+    const msg = { ...row, created_at: now };
     memoryStore.world_messages.push(msg);
-    // Keep only the last 500 messages in memory
     if (memoryStore.world_messages.length > 500) {
       memoryStore.world_messages = memoryStore.world_messages.slice(-500);
     }
@@ -726,7 +787,7 @@ const db = {
       let query = supabase
         .from("world_messages")
         .select(
-          "id, sender_id, sender_name, sender_avatar, content, created_at",
+          "id, sender_id, sender_name, sender_avatar, content, created_at, media_url, media_type, media_thumbnail, media_width, media_height, media_duration, media_size, media_mime_type",
         )
         .order("created_at", { ascending: false })
         .limit(limit);
@@ -842,13 +903,291 @@ const db = {
     const entry = memoryStore.push_tokens.find((t) => t.token === token);
     if (entry) entry.last_used_at = new Date().toISOString();
   },
+
+  // ─── User Devices (Native FCM/APNs) ─────────────────────────────────────
+
+  /**
+   * Register or update a device for a user.
+   * Upserts on (user_id, device_id) — supports multi-device.
+   */
+  async saveDevice(
+    userId,
+    {
+      deviceId,
+      platform,
+      pushToken,
+      tokenType,
+      appVersion,
+      osVersion,
+      deviceName,
+    },
+  ) {
+    const now = new Date().toISOString();
+    if (supabase) {
+      const { data, error } = await supabase.from("user_devices").upsert(
+        {
+          user_id: userId,
+          device_id: deviceId || "unknown",
+          platform: platform || "android",
+          push_token: pushToken,
+          token_type: tokenType || "fcm",
+          app_version: appVersion || null,
+          os_version: osVersion || null,
+          device_name: deviceName || null,
+          is_active: true,
+          last_seen_at: now,
+          updated_at: now,
+        },
+        { onConflict: "user_id,device_id" },
+      );
+      if (error) throw error;
+      return data;
+    }
+    // In-memory fallback
+    const existing = memoryStore.user_devices.find(
+      (d) => d.user_id === userId && d.device_id === (deviceId || "unknown"),
+    );
+    if (existing) {
+      existing.push_token = pushToken;
+      existing.token_type = tokenType || "fcm";
+      existing.is_active = true;
+      existing.last_seen_at = now;
+      existing.updated_at = now;
+      if (appVersion) existing.app_version = appVersion;
+      if (osVersion) existing.os_version = osVersion;
+      if (deviceName) existing.device_name = deviceName;
+      return existing;
+    }
+    const entry = {
+      id: require("uuid").v4(),
+      user_id: userId,
+      device_id: deviceId || "unknown",
+      platform: platform || "android",
+      push_token: pushToken,
+      token_type: tokenType || "fcm",
+      app_version: appVersion || null,
+      os_version: osVersion || null,
+      device_name: deviceName || null,
+      is_active: true,
+      last_seen_at: now,
+      created_at: now,
+      updated_at: now,
+    };
+    memoryStore.user_devices.push(entry);
+    return entry;
+  },
+
+  /**
+   * Get all active devices for a user (for push fan-out).
+   */
+  async getActiveDevices(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("user_devices")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("is_active", true);
+      if (error) throw error;
+      return data || [];
+    }
+    return memoryStore.user_devices.filter(
+      (d) => d.user_id === userId && d.is_active,
+    );
+  },
+
+  /**
+   * Deactivate a specific device (on logout from that device).
+   */
+  async deactivateDevice(userId, deviceId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("user_devices")
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("device_id", deviceId);
+      if (error) throw error;
+      return;
+    }
+    const device = memoryStore.user_devices.find(
+      (d) => d.user_id === userId && d.device_id === deviceId,
+    );
+    if (device) {
+      device.is_active = false;
+      device.updated_at = new Date().toISOString();
+    }
+  },
+
+  /**
+   * Deactivate ALL devices for a user (full logout / account deletion).
+   */
+  async deactivateAllDevices(userId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("user_devices")
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("is_active", true);
+      if (error) throw error;
+      return;
+    }
+    memoryStore.user_devices
+      .filter((d) => d.user_id === userId)
+      .forEach((d) => {
+        d.is_active = false;
+        d.updated_at = new Date().toISOString();
+      });
+  },
+
+  /**
+   * Deactivate device by push token (for invalid token cleanup).
+   */
+  async deactivateDeviceByToken(token) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("user_devices")
+        .update({
+          is_active: false,
+          push_token: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("push_token", token);
+      if (error) throw error;
+      return;
+    }
+    const device = memoryStore.user_devices.find((d) => d.push_token === token);
+    if (device) {
+      device.is_active = false;
+      device.push_token = null;
+      device.updated_at = new Date().toISOString();
+    }
+  },
+
+  /**
+   * Update last_seen for a device (heartbeat / app foreground).
+   */
+  async touchDevice(userId, deviceId) {
+    if (supabase) {
+      await supabase
+        .from("user_devices")
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("device_id", deviceId);
+      return;
+    }
+    const device = memoryStore.user_devices.find(
+      (d) => d.user_id === userId && d.device_id === deviceId,
+    );
+    if (device) device.last_seen_at = new Date().toISOString();
+  },
+
+  // ─── Notification Preferences ──────────────────────────────────────────────
+
+  /**
+   * Get a specific notification preference for a user+type.
+   */
+  async getNotificationPreference(userId, type) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("notification_preferences")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("type", type)
+        .single();
+      if (error && error.code !== "PGRST116") throw error;
+      return data;
+    }
+    return (
+      memoryStore.notification_preferences.find(
+        (p) => p.user_id === userId && p.type === type,
+      ) || null
+    );
+  },
+
+  /**
+   * Get ALL notification preferences for a user.
+   */
+  async getNotificationPreferences(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("notification_preferences")
+        .select("*")
+        .eq("user_id", userId)
+        .order("type");
+      if (error) throw error;
+      return data || [];
+    }
+    return memoryStore.notification_preferences.filter(
+      (p) => p.user_id === userId,
+    );
+  },
+
+  /**
+   * Create or update a notification preference.
+   */
+  async upsertNotificationPreference(userId, type, settings) {
+    const now = new Date().toISOString();
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("notification_preferences")
+        .upsert(
+          {
+            user_id: userId,
+            type,
+            push_enabled: settings.push_enabled ?? true,
+            in_app_enabled: settings.in_app_enabled ?? true,
+            sound_enabled: settings.sound_enabled ?? true,
+            vibrate_enabled: settings.vibrate_enabled ?? true,
+            updated_at: now,
+          },
+          { onConflict: "user_id,type" },
+        )
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+    // In-memory
+    const existing = memoryStore.notification_preferences.find(
+      (p) => p.user_id === userId && p.type === type,
+    );
+    if (existing) {
+      if (settings.push_enabled !== undefined)
+        existing.push_enabled = settings.push_enabled;
+      if (settings.in_app_enabled !== undefined)
+        existing.in_app_enabled = settings.in_app_enabled;
+      if (settings.sound_enabled !== undefined)
+        existing.sound_enabled = settings.sound_enabled;
+      if (settings.vibrate_enabled !== undefined)
+        existing.vibrate_enabled = settings.vibrate_enabled;
+      existing.updated_at = now;
+      return existing;
+    }
+    const pref = {
+      id: require("uuid").v4(),
+      user_id: userId,
+      type,
+      push_enabled: settings.push_enabled ?? true,
+      in_app_enabled: settings.in_app_enabled ?? true,
+      sound_enabled: settings.sound_enabled ?? true,
+      vibrate_enabled: settings.vibrate_enabled ?? true,
+      created_at: now,
+      updated_at: now,
+    };
+    memoryStore.notification_preferences.push(pref);
+    return pref;
+  },
+
   // ─── Profile Updates ──────────────────────────────────────────────────────
-  async updateUserProfile(userId, { name, bio, is_private, secret_name }) {
+  async updateUserProfile(
+    userId,
+    { name, bio, is_private, secret_name, avatar_url },
+  ) {
     const updates = { updated_at: new Date().toISOString() };
     if (name !== undefined) updates.name = name.trim();
     if (bio !== undefined) updates.bio = bio || null;
     if (is_private !== undefined) updates.is_private = is_private;
     if (secret_name !== undefined) updates.secret_name = secret_name || null;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
 
     if (supabase) {
       const { data, error } = await supabase
@@ -856,13 +1195,13 @@ const db = {
         .update(updates)
         .eq("id", userId)
         .select(
-          "id, name, email, bio, avatar_seed, email_verified, is_private, secret_name, created_at",
+          "id, name, email, phone, bio, avatar_seed, avatar_url, email_verified, is_private, secret_name, created_at",
         )
         .single();
       if (error) throw error;
       return data;
     }
-    const user = memoryStore.users.find((u) => u.id === id);
+    const user = memoryStore.users.find((u) => u.id === userId);
     if (user) Object.assign(user, updates);
     const { password_hash, ...safe } = user;
     return safe;
@@ -892,7 +1231,7 @@ const db = {
       const { data, error } = await supabase
         .from("users")
         .select(
-          "id, name, email, avatar_seed, email_verified, is_private, secret_name, created_at",
+          "id, name, email, avatar_seed, avatar_url, email_verified, is_private, secret_name, created_at",
         )
         .eq("secret_name", secretName)
         .single();
@@ -1092,7 +1431,9 @@ const db = {
 
       const { data: friends } = await supabase
         .from("users")
-        .select("id, name, avatar_seed")
+        .select(
+          "id, name, email, bio, avatar_seed, avatar_url, is_private, created_at",
+        )
         .in("id", friendIds);
       return friends || [];
     }

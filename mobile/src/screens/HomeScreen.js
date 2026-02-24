@@ -13,6 +13,7 @@ import {
   RefreshControl,
   Image,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 import { useSignaling } from "../context/SignalingContext";
@@ -20,6 +21,7 @@ import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import signalingClient from "../services/socket";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
+import ProfilePictureViewer from "../components/ProfilePictureViewer";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -40,14 +42,41 @@ function formatTime(dateStr) {
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+function getMessagePreview(item, currentUserId) {
+  if (
+    !item.last_message &&
+    !item.last_message_media_type &&
+    !item.last_message_at
+  )
+    return "No messages yet";
+
+  const prefix = item.last_message_sender === currentUserId ? "You: " : "";
+  if (item.last_message) return prefix + item.last_message;
+
+  if (
+    item.last_message_media_type === "audio" ||
+    item.last_message_media_type === "voice"
+  )
+    return prefix + "Voice message";
+  if (item.last_message_media_type === "video") return prefix + "Video";
+  if (item.last_message_media_type === "image") return prefix + "Photo";
+
+  // Fallback if media_type somehow gets dropped but we know there's a message
+  if (item.last_message_at) return prefix + "Media";
+
+  return "No messages yet";
+}
+
 export default function HomeScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
-  const { onlineUsers } = useSignaling();
+  const { onlineUsers, profileUpdates } = useSignaling();
   const [conversations, setConversations] = useState([]);
   const [activeFilter, setActiveFilter] = useState("All");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  const [avatarViewerData, setAvatarViewerData] = useState(null);
 
   // Fetch unread notification count
   useEffect(() => {
@@ -95,6 +124,7 @@ export default function HomeScreen({ navigation }) {
           updated[idx] = {
             ...updated[idx],
             last_message: data.message.content,
+            last_message_media_type: data.message.media_type,
             last_message_at: data.message.created_at,
             last_message_sender: data.message.sender_id,
             unread_count: (updated[idx].unread_count || 0) + 1,
@@ -132,6 +162,12 @@ export default function HomeScreen({ navigation }) {
   // ─── Render Chat Item ──────────────────────────────────────────────────
   const renderChatItem = ({ item }) => {
     const isOnline = onlineUsers.has(item.other_user_id);
+    // ★ Real-time avatar: check for WebSocket profile updates first
+    const liveProfile = profileUpdates.get(item.other_user_id);
+    const avatarUri = liveProfile
+      ? `${liveProfile.avatarUrl}?t=${liveProfile.timestamp}`
+      : item.other_user_avatar_url ||
+        `${AVATAR_BASE}${encodeURIComponent(item.other_user_name)}`;
     return (
       <TouchableOpacity
         style={styles.chatCard}
@@ -140,30 +176,31 @@ export default function HomeScreen({ navigation }) {
             conversationId: item.id,
             otherUser: {
               id: item.other_user_id,
-              name: item.other_user_name,
+              name: liveProfile?.name || item.other_user_name,
               avatar_seed: item.other_user_avatar,
+              avatar_url: liveProfile?.avatarUrl || item.other_user_avatar_url,
             },
           })
         }
         activeOpacity={0.7}
       >
-        <View style={styles.avatarContainer}>
-          <Image
-            source={{
-              uri: `${AVATAR_BASE}${encodeURIComponent(item.other_user_name)}`,
-            }}
-            style={styles.avatar}
-          />
+        <TouchableOpacity
+          style={styles.avatarContainer}
+          onPress={() =>
+            setAvatarViewerData({
+              uri: avatarUri,
+              name: liveProfile?.name || item.other_user_name,
+            })
+          }
+          activeOpacity={0.8}
+        >
+          <Image source={{ uri: avatarUri }} style={styles.avatar} />
           {isOnline && <View style={styles.onlineDot} />}
-        </View>
+        </TouchableOpacity>
         <View style={styles.chatInfo}>
           <Text style={styles.chatName}>{item.other_user_name}</Text>
           <Text style={styles.chatPreview} numberOfLines={1}>
-            {item.last_message
-              ? item.last_message_sender === user?.id
-                ? `You: ${item.last_message}`
-                : item.last_message
-              : "No messages yet"}
+            {getMessagePreview(item, user?.id)}
           </Text>
         </View>
         <View style={styles.chatMeta}>
@@ -189,10 +226,13 @@ export default function HomeScreen({ navigation }) {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         {/* Row 1: Title + grid icon */}
         <View style={styles.headerRow}>
-          <Text style={styles.greeting}>Let's Aux</Text>
+          <Text style={styles.greeting}>
+            Let's Aux{" "}
+            <Text style={{ color: "#EF4444", fontSize: 20 }}>{"\u2764"}</Text>
+          </Text>
           <TouchableOpacity
             onPress={() => {
               setUnreadNotifCount(0);
@@ -289,6 +329,14 @@ export default function HomeScreen({ navigation }) {
           }
         />
       )}
+
+      {/* Profile Picture Viewer */}
+      <ProfilePictureViewer
+        visible={!!avatarViewerData}
+        imageUri={avatarViewerData?.uri}
+        userName={avatarViewerData?.name}
+        onClose={() => setAvatarViewerData(null)}
+      />
     </View>
   );
 }
@@ -300,7 +348,6 @@ const styles = StyleSheet.create({
   },
   header: {
     paddingHorizontal: spacing.lg,
-    paddingTop: 60,
     paddingBottom: spacing.sm,
   },
   headerRow: {

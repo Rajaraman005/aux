@@ -108,12 +108,27 @@ router.get("/:id/messages", async (req, res) => {
 router.post("/:id/messages", async (req, res) => {
   try {
     const conversationId = req.params.id;
-    const { content } = req.body;
+    const {
+      content,
+      media_url,
+      media_type,
+      media_thumbnail,
+      media_width,
+      media_height,
+      media_duration,
+      media_size,
+      media_mime_type,
+    } = req.body;
 
-    if (!content || content.trim().length === 0) {
-      return res.status(400).json({ error: "Message content is required" });
+    const hasContent = content && content.trim().length > 0;
+    const hasMedia = media_url && media_type;
+
+    if (!hasContent && !hasMedia) {
+      return res
+        .status(400)
+        .json({ error: "Message content or media is required" });
     }
-    if (content.length > 5000) {
+    if (content && content.length > 5000) {
       return res.status(400).json({ error: "Message too long (max 5000)" });
     }
 
@@ -129,7 +144,15 @@ router.post("/:id/messages", async (req, res) => {
     const message = await db.createMessage({
       conversation_id: conversationId,
       sender_id: req.user.id,
-      content: content.trim(),
+      content: hasContent ? content.trim() : null,
+      media_url: media_url || null,
+      media_type: media_type || null,
+      media_thumbnail: media_thumbnail || null,
+      media_width: media_width || null,
+      media_height: media_height || null,
+      media_duration: media_duration || null,
+      media_size: media_size || null,
+      media_mime_type: media_mime_type || null,
     });
 
     res.status(201).json({ message });

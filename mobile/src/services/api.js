@@ -201,6 +201,155 @@ class ApiClient {
   delete(url) {
     return this.request(url, { method: "DELETE" });
   }
+
+  /**
+   * Upload a file via multipart/form-data.
+   * Does NOT set Content-Type — lets fetch auto-set the boundary.
+   */
+  async uploadFile(url, formData) {
+    const headers = {};
+    if (this.accessToken) {
+      headers["Authorization"] = `Bearer ${this.accessToken}`;
+    }
+
+    console.log(`📡 API UPLOAD ${url}`);
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s for uploads
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      console.log(`📡 API UPLOAD ${url} → ${response.status}`);
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw { status: response.status, ...data };
+      }
+
+      return data;
+    } catch (err) {
+      if (err.status) throw err;
+
+      const isTimeout = err.name === "AbortError";
+      throw {
+        status: 0,
+        error: isTimeout
+          ? "Upload timed out. Try a smaller image."
+          : "Network error. Check your connection.",
+        code: isTimeout ? "TIMEOUT" : "NETWORK_ERROR",
+      };
+    }
+  }
+
+  /**
+   * Upload with progress tracking via XMLHttpRequest.
+   * Returns { promise, abort } — call abort() to cancel.
+   *
+   * @param {string} url - Upload endpoint
+   * @param {FormData} formData - Multipart form data
+   * @param {function} onProgress - Called with 0-1 progress value
+   * @returns {{ promise: Promise<object>, abort: function }}
+   */
+  uploadWithProgress(url, formData, onProgress) {
+    const self = this;
+
+    const doUpload = (token) => {
+      const xhr = new XMLHttpRequest();
+
+      const promise = new Promise((resolve, reject) => {
+        xhr.upload.addEventListener("progress", (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(e.loaded / e.total);
+          }
+        });
+
+        xhr.addEventListener("load", async () => {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(data);
+            } else if (xhr.status === 401 && self.refreshToken) {
+              // Token expired — attempt refresh and retry
+              try {
+                const refreshed = await self.attemptTokenRefresh();
+                if (refreshed) {
+                  // Retry with new token
+                  const retryResult = doUpload(self.accessToken);
+                  retryResult.promise.then(resolve).catch(reject);
+                } else {
+                  reject({
+                    status: 401,
+                    error: "Session expired",
+                    code: "SESSION_EXPIRED",
+                  });
+                }
+              } catch {
+                reject({
+                  status: 401,
+                  error: "Session expired",
+                  code: "SESSION_EXPIRED",
+                });
+              }
+            } else {
+              reject({ status: xhr.status, ...data });
+            }
+          } catch {
+            reject({
+              status: xhr.status,
+              error: "Invalid server response",
+              code: "PARSE_ERROR",
+            });
+          }
+        });
+
+        xhr.addEventListener("error", () => {
+          reject({
+            status: 0,
+            error: "Network error. Check your connection.",
+            code: "NETWORK_ERROR",
+          });
+        });
+
+        xhr.addEventListener("timeout", () => {
+          reject({
+            status: 0,
+            error: "Upload timed out. Try a smaller image.",
+            code: "TIMEOUT",
+          });
+        });
+
+        xhr.addEventListener("abort", () => {
+          reject({
+            status: 0,
+            error: "Upload cancelled.",
+            code: "CANCELLED",
+          });
+        });
+
+        xhr.open("POST", url);
+        xhr.timeout = 60000;
+
+        if (token) {
+          xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        }
+
+        xhr.send(formData);
+      });
+
+      return {
+        promise,
+        abort: () => xhr.abort(),
+      };
+    };
+
+    return doUpload(this.accessToken);
+  }
 }
 
 // Singleton

@@ -29,6 +29,7 @@ const endpoints = {
     search: `${API_BASE}/api/users/search`,
     me: `${API_BASE}/api/users/me`,
     password: `${API_BASE}/api/users/me/password`,
+    avatar: `${API_BASE}/api/users/me/avatar`,
     profile: (id) => `${API_BASE}/api/users/${id}`,
   },
   friends: {
@@ -52,13 +53,21 @@ const endpoints = {
     count: `${API_BASE}/api/notifications/count`,
     read: (id) => `${API_BASE}/api/notifications/${id}/read`,
     readAll: `${API_BASE}/api/notifications/read-all`,
+    preferences: `${API_BASE}/api/notifications/preferences`,
   },
   turn: `${API_BASE}/api/turn-credentials`,
   metrics: `${API_BASE}/api/metrics/call`,
   health: `${API_BASE}/health`,
+  media: {
+    sign: `${API_BASE}/api/media/sign`,
+    validate: `${API_BASE}/api/media/validate`,
+  },
   push: {
     register: `${API_BASE}/api/push/register`,
     unregister: `${API_BASE}/api/push/unregister`,
+  },
+  calls: {
+    reject: `${API_BASE}/api/calls/reject`,
   },
   oauth: {
     googleUrl: `${API_BASE}/api/oauth/google/url`,

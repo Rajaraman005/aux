@@ -182,6 +182,7 @@ router.post("/verify", authLimiter, async (req, res) => {
         phone: user.phone,
         bio: user.bio || null,
         avatarSeed: user.avatar_seed,
+        avatarUrl: user.avatar_url || null,
       },
     });
   } catch (err) {
@@ -268,6 +269,7 @@ router.post(
           phone: user.phone,
           bio: user.bio || null,
           avatarSeed: user.avatar_seed,
+          avatarUrl: user.avatar_url || null,
         },
       });
     } catch (err) {

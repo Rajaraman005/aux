@@ -1,6 +1,15 @@
 /**
  * ProfileScreen — Clean light design matching reference.
  * Features: Edit name, change password, private account toggle, secret name, friends.
+ *
+ * Image upload pipeline:
+ *   1. Pick image (camera/gallery) — NO system editor (allowsEditing: false)
+ *   2. Navigate to custom ImageEditorScreen (crop, zoom, rotate)
+ *   3. Optimistic UI — show local preview instantly
+ *   4. Client-side compress (512x512, JPEG 0.8)
+ *   5. Upload with progress indicator via XHR
+ *   6. Retry on failure, cancel support
+ *   7. Cache-bust on success
  */
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
@@ -14,14 +23,19 @@ import {
   Switch,
   ActivityIndicator,
   StatusBar,
-  Image,
+  Platform,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
+import { Image } from "expo-image";
+import { BlurView } from "expo-blur";
+import * as ImagePicker from "expo-image-picker";
 import { useAuth } from "../context/AuthContext";
 import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import CustomPopup from "../components/CustomPopup";
+import ProfilePictureViewer from "../components/ProfilePictureViewer";
+import { compressImage } from "../utils/imageUtils";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -42,12 +56,21 @@ export default function ProfileScreen({ navigation }) {
   const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [saving, setSaving] = useState(false);
   const [changingPw, setChangingPw] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [localPreviewUri, setLocalPreviewUri] = useState(null);
+  const [showPhotoPicker, setShowPhotoPicker] = useState(false);
+  const [showAvatarViewer, setShowAvatarViewer] = useState(false);
   const [profileDirty, setProfileDirty] = useState(false);
+  const [phone, setPhone] = useState(user?.phone || "");
   const [popup, setPopup] = useState({
     visible: false,
     title: "",
     message: "",
   });
+
+  // Upload abort controller
+  const uploadAbortRef = useRef(null);
 
   // ─── Animations ───────────────────────────────────────────────────────────
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -84,9 +107,20 @@ export default function ProfileScreen({ navigation }) {
       name !== (user?.name || "") ||
       bio !== (user?.bio || "") ||
       isPrivate !== (user?.isPrivate || false) ||
-      secretName !== (user?.secretName || "");
+      secretName !== (user?.secretName || "") ||
+      phone !== (user?.phone || "");
     setProfileDirty(dirty);
-  }, [name, bio, isPrivate, secretName, user]);
+  }, [name, bio, isPrivate, secretName, phone, user]);
+
+  // Cleanup upload abort on unmount
+  useEffect(() => {
+    return () => {
+      if (uploadAbortRef.current) {
+        uploadAbortRef.current();
+        uploadAbortRef.current = null;
+      }
+    };
+  }, []);
 
   // ─── Save Profile ─────────────────────────────────────────────────────────
   const handleSaveProfile = useCallback(async () => {
@@ -115,6 +149,7 @@ export default function ProfileScreen({ navigation }) {
         bio: bio.trim() || null,
         isPrivate,
         secretName: isPrivate ? secretName : null,
+        phone: phone.trim() || null,
       });
       setUser(result);
       await apiClient.saveUser(result);
@@ -129,7 +164,164 @@ export default function ProfileScreen({ navigation }) {
     } finally {
       setSaving(false);
     }
-  }, [name, bio, isPrivate, secretName, setUser]);
+  }, [name, bio, isPrivate, secretName, phone, setUser]);
+
+  // ─── Avatar tap — show viewer (long press) or change photo (tap) ────────
+  const handleAvatarTap = useCallback(() => {
+    setShowPhotoPicker(true);
+  }, []);
+
+  const handleAvatarLongPress = useCallback(() => {
+    if (user?.avatarUrl || localPreviewUri) {
+      setShowAvatarViewer(true);
+    }
+  }, [user?.avatarUrl, localPreviewUri]);
+
+  // ─── Upload edited image ────────────────────────────────────────────────
+  const uploadEditedImage = useCallback(
+    async (editedUri) => {
+      // Optimistic UI: show local preview immediately
+      setLocalPreviewUri(editedUri);
+      setUploadingAvatar(true);
+      setUploadProgress(0);
+
+      try {
+        // Compress (may already be compressed from editor, but ensure 512x512 JPEG)
+        const compressed = await compressImage(editedUri, {
+          maxSize: 512,
+          quality: 0.8,
+        });
+
+        // Build FormData
+        const formData = new FormData();
+        formData.append("avatar", {
+          uri:
+            Platform.OS === "ios"
+              ? compressed.uri.replace("file://", "")
+              : compressed.uri,
+          type: "image/jpeg",
+          name: "avatar.jpg",
+        });
+
+        // Upload with progress
+        const { promise, abort } = apiClient.uploadWithProgress(
+          endpoints.users.avatar,
+          formData,
+          (progress) => setUploadProgress(progress),
+        );
+
+        // Store abort function for cancellation
+        uploadAbortRef.current = abort;
+
+        const updated = await promise;
+        uploadAbortRef.current = null;
+
+        // Cache-bust
+        if (updated.avatarUrl) {
+          const separator = updated.avatarUrl.includes("?") ? "&" : "?";
+          updated.avatarUrl = `${updated.avatarUrl}${separator}t=${Date.now()}`;
+        }
+
+        setUser(updated);
+        await apiClient.saveUser(updated);
+        setLocalPreviewUri(null); // Clear local preview, use server URL now
+        setPopup({
+          visible: true,
+          title: "Success",
+          message: "Profile photo updated!",
+        });
+      } catch (err) {
+        console.error("Avatar upload error:", err);
+        if (err.code === "CANCELLED") {
+          setLocalPreviewUri(null);
+          return;
+        }
+        // Keep local preview on failure — offer retry
+        const msg = err.error || "Failed to upload photo.";
+        setPopup({
+          visible: true,
+          title: "Upload Failed",
+          message: msg,
+          buttons: [
+            {
+              text: "Retry",
+              primary: true,
+              onPress: () => {
+                setPopup({ visible: false, title: "", message: "" });
+                uploadEditedImage(editedUri);
+              },
+            },
+            {
+              text: "Cancel",
+              onPress: () => {
+                setLocalPreviewUri(null);
+                setPopup({ visible: false, title: "", message: "" });
+              },
+            },
+          ],
+        });
+      } finally {
+        setUploadingAvatar(false);
+        setUploadProgress(0);
+      }
+    },
+    [setUser],
+  );
+
+  // ─── Cancel upload ──────────────────────────────────────────────────────
+  const handleCancelUpload = useCallback(() => {
+    if (uploadAbortRef.current) {
+      uploadAbortRef.current();
+      uploadAbortRef.current = null;
+    }
+  }, []);
+
+  // ─── Pick Image → Navigate to Editor ───────────────────────────────────
+  const pickImage = useCallback(
+    async (launcher) => {
+      setShowPhotoPicker(false);
+      try {
+        const { status } =
+          launcher === ImagePicker.launchCameraAsync
+            ? await ImagePicker.requestCameraPermissionsAsync()
+            : await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+        if (status !== "granted") {
+          setPopup({
+            visible: true,
+            title: "Permission Denied",
+            message: "Please allow access to your photos in Settings.",
+          });
+          return;
+        }
+
+        // No system editor — we use our custom one
+        const result = await launcher({
+          mediaTypes: ["images"],
+          allowsEditing: false,
+          quality: 0.8,
+        });
+
+        if (result.canceled) return;
+
+        const asset = result.assets[0];
+
+        // Navigate to custom image editor
+        navigation.navigate("ImageEditor", {
+          imageUri: asset.uri,
+          onComplete: uploadEditedImage,
+        });
+      } catch (err) {
+        console.error("Image picker error:", err);
+        setPopup({
+          visible: true,
+          title: "Error",
+          message: "Failed to open image picker.",
+        });
+      }
+    },
+    [navigation, uploadEditedImage],
+  );
 
   // ─── Change Password ──────────────────────────────────────────────────────
   const handleChangePassword = useCallback(async () => {
@@ -190,28 +382,43 @@ export default function ProfileScreen({ navigation }) {
     outputRange: [0, 0, 1],
   });
 
+  // Resolved avatar URI: local preview > server URL > fallback
+  const avatarUri =
+    localPreviewUri ||
+    user?.avatarUrl ||
+    `${AVATAR_BASE}${encodeURIComponent(user?.name || "User")}`;
+
+  // Progress bar width animation
+
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <View style={styles.container}>
       <StatusBar barStyle="dark-content" />
 
-      {/* Header */}
-      <View style={styles.header}>
+      {/* Fixed Back Button */}
+      <View
+        style={{
+          position: "absolute",
+          top: insets.top,
+          left: 0,
+          zIndex: 60,
+          paddingHorizontal: 20,
+          paddingVertical: 10,
+        }}
+      >
         <TouchableOpacity
-          style={styles.backBtn}
+          style={styles.backBtnBlur}
           onPress={() => navigation.goBack()}
           activeOpacity={0.7}
         >
           <Icon name="arrow-left" size={22} color="#1A1A2E" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Personal Information</Text>
-        <View style={{ width: 40 }} />
       </View>
 
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: insets.bottom + 100 },
+          { paddingTop: 0, paddingBottom: 40 },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
@@ -220,204 +427,292 @@ export default function ProfileScreen({ navigation }) {
           style={{
             opacity: fadeAnim,
             transform: [{ translateY: slideAnim }],
+            width: "100%",
           }}
         >
-          {/* ─── Avatar Section ──────────────────────────────────────── */}
-          <View style={styles.avatarSection}>
-            <View style={styles.avatarRing}>
-              <Image
-                source={{
-                  uri: `${AVATAR_BASE}${encodeURIComponent(user?.name || "User")}`,
-                }}
-                style={styles.avatar}
+          {/* Scrolling Title (Absolute within ScrollView to avoid gap) */}
+          <View
+            style={{
+              position: "absolute",
+              top: insets.top,
+              left: 0,
+              right: 0,
+              height: 56,
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 20,
+            }}
+          >
+            <Text style={styles.headerTitleDark}>Profile</Text>
+          </View>
+          {/* ─── Banner Background ───────────────────────────────────────── */}
+          <View style={styles.bannerContainer}>
+            <Image
+              source={require("../../assets/banner.jpg")}
+              style={styles.bannerImage}
+              blurRadius={Platform.OS === "ios" ? 0 : 40}
+            />
+            {Platform.OS === "ios" && (
+              <BlurView
+                intensity={60}
+                style={StyleSheet.absoluteFill}
+                tint="light"
               />
-              {isPrivate && (
+            )}
+            <View style={styles.bannerOverlay} />
+          </View>
+
+          {/* ─── Avatar Section ────────────────────────────────────────── */}
+          <View style={styles.avatarSection}>
+            <View style={styles.avatarRingPremium}>
+              <TouchableOpacity
+                onPress={() => setShowAvatarViewer(true)}
+                activeOpacity={0.9}
+                style={styles.avatarTouch}
+              >
+                <Image
+                  source={{ uri: avatarUri }}
+                  style={styles.avatar}
+                  contentFit="cover"
+                  cachePolicy="memory-disk"
+                  transition={200}
+                />
+              </TouchableOpacity>
+
+              {/* Edit Trigger (Pencil Icon) */}
+              {!uploadingAvatar && (
+                <TouchableOpacity
+                  style={styles.editBadge}
+                  onPress={handleAvatarTap}
+                  activeOpacity={0.8}
+                >
+                  <Icon name="edit-2" size={14} color="#fff" />
+                </TouchableOpacity>
+              )}
+
+              {/* Upload overlay with simple spinner */}
+              {uploadingAvatar && (
+                <View style={styles.avatarOverlay}>
+                  <ActivityIndicator color="#fff" size="small" />
+                </View>
+              )}
+
+              {isPrivate && !uploadingAvatar && (
                 <View style={styles.privateBadge}>
                   <Icon name="lock" size={10} color="#fff" />
                 </View>
               )}
             </View>
-            <Text style={styles.changePhotoText}>Change your photo</Text>
           </View>
 
-          {/* ─── Name Field ─────────────────────────────────────────── */}
-          <Text style={styles.fieldLabel}>Name</Text>
-          <TextInput
-            style={styles.fieldInput}
-            value={name}
-            onChangeText={setName}
-            placeholder="Your display name"
-            placeholderTextColor="#C7C7CC"
-            autoCapitalize="words"
-          />
-          <View style={styles.divider} />
-
-          {/* ─── Bio Field ──────────────────────────────────────────── */}
-          <Text style={styles.fieldLabel}>Bio</Text>
-          <View style={styles.bioRow}>
-            <TextInput
-              style={[styles.fieldInput, { flex: 1 }]}
-              value={bio}
-              onChangeText={(text) => setBio(text.slice(0, 12))}
-              placeholder="Write a short bio..."
-              placeholderTextColor="#C7C7CC"
-              maxLength={12}
-            />
-            <Text style={styles.bioCounter}>{bio.length}/12</Text>
-          </View>
-          <View style={styles.divider} />
-
-          {/* ─── Email Field ──────────────────────────────────────── */}
-          <Text style={styles.fieldLabel}>Email</Text>
-          <Text style={styles.fieldValue}>{user?.email || ""}</Text>
-          <View style={styles.divider} />
-
-          {/* ─── Phone Number Field ────────────────────────────────── */}
-          <Text style={styles.fieldLabel}>Phone Number</Text>
-          <Text style={styles.fieldValue}>{user?.phone || "Not set"}</Text>
-          <View style={styles.divider} />
-
-          {/* ─── Private Account Toggle ─────────────────────────────── */}
-          <View style={styles.toggleRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.toggleLabel}>Private Account</Text>
-              <Text style={styles.toggleSubtext}>
-                Hidden from search & world chat
-              </Text>
-            </View>
-            <Switch
-              value={isPrivate}
-              onValueChange={setIsPrivate}
-              trackColor={{ false: "#E5E5EA", true: "#22c15a" }}
-              thumbColor="#fff"
-              ios_backgroundColor="#E5E5EA"
-            />
-          </View>
-
-          {/* Secret Name (Animated reveal) */}
-          <Animated.View
-            style={{
-              maxHeight: secretNameMaxHeight,
-              opacity: secretNameOpacity,
-              overflow: "hidden",
-            }}
-          >
-            <Text style={[styles.fieldLabel, { marginTop: 8 }]}>
-              Secret Name
+          {/* ─── Form Details ─────────────────────────────────────────── */}
+          <View style={{ paddingHorizontal: 0, paddingBottom: 20 }}>
+            {/* ─── Name Field ─────────────────────────────────────────── */}
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Name
             </Text>
             <TextInput
-              style={styles.fieldInput}
-              value={secretName}
-              onChangeText={setSecretName}
-              placeholder="Your unique secret name"
+              style={[styles.fieldInput, { paddingHorizontal: 24 }]}
+              value={name}
+              onChangeText={setName}
+              placeholder="Your display name"
               placeholderTextColor="#C7C7CC"
-              autoCapitalize="none"
-              autoCorrect={false}
+              autoCapitalize="words"
             />
-            <Text style={styles.hint}>
-              Others can find you only by typing this name exactly
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
+
+            {/* ─── Bio Field ──────────────────────────────────────────── */}
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Bio
             </Text>
-          </Animated.View>
-          <View style={styles.divider} />
-
-          {/* ─── Change Password Section ─────────────────────────────── */}
-          <Text style={styles.sectionTitle}>Change Password</Text>
-
-          <Text style={styles.fieldLabel}>Current Password</Text>
-          <View style={styles.passwordRow}>
-            <TextInput
-              style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
-              value={currentPassword}
-              onChangeText={setCurrentPassword}
-              placeholder="Enter current password"
-              placeholderTextColor="#C7C7CC"
-              secureTextEntry={!showCurrentPw}
-            />
-            <TouchableOpacity
-              onPress={() => setShowCurrentPw(!showCurrentPw)}
-              style={styles.eyeBtn}
-            >
-              <Icon
-                name={showCurrentPw ? "eye-off" : "eye"}
-                size={18}
-                color="#C7C7CC"
+            <View style={[styles.bioRow, { paddingHorizontal: 24 }]}>
+              <TextInput
+                style={[styles.fieldInput, { flex: 1 }]}
+                value={bio}
+                onChangeText={setBio}
+                placeholder="Short bio (12 chars)"
+                placeholderTextColor="#C7C7CC"
+                maxLength={12}
               />
-            </TouchableOpacity>
-          </View>
-          <View style={styles.divider} />
+              <Text style={styles.bioCounter}>{bio.length}/12</Text>
+            </View>
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
 
-          <Text style={styles.fieldLabel}>New Password</Text>
-          <View style={styles.passwordRow}>
-            <TextInput
-              style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
-              value={newPassword}
-              onChangeText={setNewPassword}
-              placeholder="Min. 8 characters"
-              placeholderTextColor="#C7C7CC"
-              secureTextEntry={!showNewPw}
-            />
-            <TouchableOpacity
-              onPress={() => setShowNewPw(!showNewPw)}
-              style={styles.eyeBtn}
-            >
-              <Icon
-                name={showNewPw ? "eye-off" : "eye"}
-                size={18}
-                color="#C7C7CC"
-              />
-            </TouchableOpacity>
-          </View>
-
-          {/* Password strength */}
-          {newPassword.length > 0 && (
-            <View style={styles.strengthRow}>
-              <View
-                style={[
-                  styles.strengthBar,
-                  {
-                    width: `${Math.min((newPassword.length / 16) * 100, 100)}%`,
-                    backgroundColor:
-                      newPassword.length < 8
-                        ? "#EF4444"
-                        : newPassword.length < 12
-                          ? "#FBBF24"
-                          : "#22c15a",
-                  },
-                ]}
-              />
-              <Text style={styles.strengthText}>
-                {newPassword.length < 8
-                  ? "Too short"
-                  : newPassword.length < 12
-                    ? "Good"
-                    : "Strong"}
+            {/* ─── Email Field (Read-only) ─────────────────────────────── */}
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Email
+            </Text>
+            <View style={{ paddingVertical: 10, paddingHorizontal: 24 }}>
+              <Text style={{ fontSize: 16, color: "#1A1A2E" }}>
+                {user?.email}
               </Text>
             </View>
-          )}
-          <View style={styles.divider} />
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
 
-          <Text style={styles.fieldLabel}>Confirm New Password</Text>
-          <View style={styles.passwordRow}>
+            {/* ─── Phone Field ────────────────────────────────────────── */}
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Phone Number
+            </Text>
             <TextInput
-              style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
-              value={confirmPassword}
-              onChangeText={setConfirmPassword}
-              placeholder="Re-enter new password"
+              style={[styles.fieldInput, { paddingHorizontal: 24 }]}
+              value={phone}
+              onChangeText={setPhone}
+              placeholder="Your phone number"
               placeholderTextColor="#C7C7CC"
-              secureTextEntry={!showConfirmPw}
+              keyboardType="phone-pad"
             />
-            <TouchableOpacity
-              onPress={() => setShowConfirmPw(!showConfirmPw)}
-              style={styles.eyeBtn}
-            >
-              <Icon
-                name={showConfirmPw ? "eye-off" : "eye"}
-                size={18}
-                color="#C7C7CC"
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
+
+            {/* ─── Private Account Toggle ──────────────────────────────── */}
+            <View style={[styles.toggleRow, { paddingHorizontal: 24 }]}>
+              <View>
+                <Text style={styles.toggleLabel}>Private Account</Text>
+                <Text style={styles.toggleSubtext}>
+                  Hidden from search & world chat
+                </Text>
+              </View>
+              <Switch
+                value={isPrivate}
+                onValueChange={setIsPrivate}
+                trackColor={{ false: "#D1D1D6", true: "#000" }}
+                thumbColor="#fff"
               />
-            </TouchableOpacity>
+            </View>
+
+            {/* Secret Name (Animated reveal) */}
+            <Animated.View
+              style={{
+                maxHeight: secretNameMaxHeight,
+                opacity: secretNameOpacity,
+                overflow: "hidden",
+                paddingHorizontal: 24,
+              }}
+            >
+              <Text style={[styles.fieldLabel, { marginTop: 8 }]}>
+                Secret Name
+              </Text>
+              <TextInput
+                style={styles.fieldInput}
+                value={secretName}
+                onChangeText={setSecretName}
+                placeholder="Your unique secret name"
+                placeholderTextColor="#C7C7CC"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Text style={styles.hint}>
+                Others can find you only by typing this name exactly
+              </Text>
+            </Animated.View>
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
+
+            {/* ─── Change Password Section ─────────────────────────────── */}
+            <Text style={[styles.sectionTitle, { paddingHorizontal: 24 }]}>
+              Change Password
+            </Text>
+
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Current Password
+            </Text>
+            <View style={[styles.passwordRow, { paddingHorizontal: 24 }]}>
+              <TextInput
+                style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
+                value={currentPassword}
+                onChangeText={setCurrentPassword}
+                secureTextEntry={!showCurrentPw}
+                placeholder="Enter current password"
+                placeholderTextColor="#C7C7CC"
+              />
+              <TouchableOpacity
+                onPress={() => setShowCurrentPw(!showCurrentPw)}
+                style={styles.eyeBtn}
+              >
+                <Icon
+                  name={showCurrentPw ? "eye-off" : "eye"}
+                  size={18}
+                  color="#C7C7CC"
+                />
+              </TouchableOpacity>
+            </View>
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
+
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              New Password
+            </Text>
+            <View style={[styles.passwordRow, { paddingHorizontal: 24 }]}>
+              <TextInput
+                style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
+                value={newPassword}
+                onChangeText={setNewPassword}
+                secureTextEntry={!showNewPw}
+                placeholder="Min. 8 characters"
+                placeholderTextColor="#C7C7CC"
+              />
+              <TouchableOpacity
+                onPress={() => setShowNewPw(!showNewPw)}
+                style={styles.eyeBtn}
+              >
+                <Icon
+                  name={showNewPw ? "eye-off" : "eye"}
+                  size={18}
+                  color="#C7C7CC"
+                />
+              </TouchableOpacity>
+            </View>
+
+            {/* Password strength */}
+            {newPassword.length > 0 && (
+              <View style={[styles.strengthRow, { paddingHorizontal: 24 }]}>
+                <View
+                  style={[
+                    styles.strengthBar,
+                    {
+                      width: `${Math.min((newPassword.length / 16) * 100, 100)}%`,
+                      backgroundColor:
+                        newPassword.length < 8
+                          ? "#EF4444"
+                          : newPassword.length < 12
+                            ? "#FBBF24"
+                            : "#22c15a",
+                    },
+                  ]}
+                />
+                <Text style={styles.strengthText}>
+                  {newPassword.length < 8
+                    ? "Too short"
+                    : newPassword.length < 12
+                      ? "Good"
+                      : "Strong"}
+                </Text>
+              </View>
+            )}
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
+
+            <Text style={[styles.fieldLabel, { paddingHorizontal: 24 }]}>
+              Confirm New Password
+            </Text>
+            <View style={[styles.passwordRow, { paddingHorizontal: 24 }]}>
+              <TextInput
+                style={[styles.fieldInput, { flex: 1, borderBottomWidth: 0 }]}
+                value={confirmPassword}
+                onChangeText={setConfirmPassword}
+                secureTextEntry={!showConfirmPw}
+                placeholder="Re-enter new password"
+                placeholderTextColor="#C7C7CC"
+              />
+              <TouchableOpacity
+                onPress={() => setShowConfirmPw(!showConfirmPw)}
+                style={styles.eyeBtn}
+              >
+                <Icon
+                  name={showConfirmPw ? "eye-off" : "eye"}
+                  size={18}
+                  color="#C7C7CC"
+                />
+              </TouchableOpacity>
+            </View>
+            <View style={[styles.divider, { marginHorizontal: 24 }]} />
           </View>
-          <View style={styles.divider} />
         </Animated.View>
       </ScrollView>
 
@@ -454,12 +749,40 @@ export default function ProfileScreen({ navigation }) {
         ) : null}
       </View>
 
+      {/* Photo Picker Popup */}
+      <CustomPopup
+        visible={showPhotoPicker}
+        title="Change Photo"
+        message="Choose where to pick your photo from"
+        buttons={[
+          {
+            text: "Camera",
+            onPress: () => pickImage(ImagePicker.launchCameraAsync),
+          },
+          {
+            text: "Gallery",
+            primary: true,
+            onPress: () => pickImage(ImagePicker.launchImageLibraryAsync),
+          },
+        ]}
+        onClose={() => setShowPhotoPicker(false)}
+      />
+
       {/* Custom Popup */}
       <CustomPopup
         visible={popup.visible}
         title={popup.title}
         message={popup.message}
+        buttons={popup.buttons}
         onClose={() => setPopup({ visible: false, title: "", message: "" })}
+      />
+
+      {/* Profile Picture Viewer */}
+      <ProfilePictureViewer
+        visible={showAvatarViewer}
+        imageUri={avatarUri}
+        userName={user?.name}
+        onClose={() => setShowAvatarViewer(false)}
       />
     </View>
   );
@@ -478,50 +801,74 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    height: 56 + (Platform.OS === "ios" ? 0 : 10),
+    zIndex: 10,
   },
-  backBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#F0F0F0",
+  backBtnBlur: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.7)",
     alignItems: "center",
     justifyContent: "center",
   },
-  headerTitle: {
+  headerTitleDark: {
     fontSize: 18,
     fontWeight: "700",
-    color: "#1A1A2E",
-    letterSpacing: -0.2,
+    color: "#fff",
+    letterSpacing: -0.5,
   },
 
-  // Scroll
+  // Banner
+  // ─── Banner ───────────────────────────────────────────────────
+  bannerContainer: {
+    height: 200,
+    backgroundColor: "#F0EDE8",
+    width: "100%",
+  },
+  bannerImage: {
+    width: "100%",
+    height: "100%",
+  },
+  bannerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(255,255,255,0.3)",
+  },
+
   scroll: {
     flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 0,
   },
 
-  // Avatar
   avatarSection: {
     alignItems: "center",
-    marginBottom: 32,
-    marginTop: 8,
+    marginBottom: 8,
   },
-  avatarRing: {
+  avatarRingPremium: {
     position: "relative",
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: "#F0EDE8",
-    padding: 4,
-    marginBottom: 12,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "#fff",
+    padding: 5,
+    elevation: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    marginTop: -60,
+  },
+  avatarTouch: {
+    width: "100%",
+    height: "100%",
+    borderRadius: 55,
+    overflow: "hidden",
   },
   avatar: {
     width: "100%",
     height: "100%",
-    borderRadius: 50,
   },
   privateBadge: {
     position: "absolute",
@@ -536,10 +883,33 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: "#FAFAFA",
   },
-  changePhotoText: {
-    fontSize: 14,
-    color: "#8E8E93",
-    fontWeight: "500",
+
+  avatarOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    borderRadius: 50,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  editBadge: {
+    position: "absolute",
+    bottom: 0,
+    right: 0,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#1A1A2E",
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 4,
+    borderColor: "#fff",
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    zIndex: 20,
   },
 
   // Fields

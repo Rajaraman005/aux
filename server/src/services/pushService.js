@@ -1,30 +1,39 @@
 /**
- * Push Notification Service — FAANG-Grade.
+ * Push Notification Service — Enterprise-Grade Native FCM.
+ *
+ * ★ Complete rewrite: Expo Push API → Native FCM HTTP v1
  *
  * Features:
- *   - Multi-device: sends to ALL user tokens simultaneously
- *   - Token cleanup: auto-deletes DeviceNotRegistered tokens
+ *   - Multi-device: sends to ALL active user devices simultaneously
+ *   - Token cleanup: auto-deactivates invalid FCM tokens
  *   - Rate limiting: per-user cooldown (configurable per notification type)
- *   - Priority levels: "high" for calls, "default" for messages
+ *   - Priority levels: "high" for calls, "normal" for messages
  *   - Retry with exponential backoff on transient failures
  *   - Async queue: non-blocking push delivery
- *   - Metrics: tracks sent, failed, and cleaned tokens
+ *   - Notification preferences: respects per-user per-type settings
+ *   - Metrics: tracks sent, failed, cleaned tokens, rate-limited
+ *   - Deduplication: prevents redundant pushes within cooldown window
+ *
+ * Architecture:
+ *   User Action → Event → Queue → pushService → fcmService → Google → Device
  */
 const { db } = require("../db/supabase");
 const presence = require("../signaling/presence");
+const fcmService = require("./fcmService");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
-const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 1000;
-const MAX_BATCH_SIZE = 100;
 
 // ─── Rate Limiting State ────────────────────────────────────────────────────
-const pushCooldowns = new Map(); // userId -> { lastPushAt, count }
+const pushCooldowns = new Map(); // "userId:type" -> { windowStart, count }
 const RATE_LIMITS = {
-  message: { windowMs: 2000, maxPerWindow: 5 }, // 5 pushes per 2s
-  call: { windowMs: 10000, maxPerWindow: 2 }, // 2 call pushes per 10s
-  missed_call: { windowMs: 30000, maxPerWindow: 3 }, // 3 per 30s
+  message: { windowMs: 2000, maxPerWindow: 5 },
+  call: { windowMs: 10000, maxPerWindow: 2 },
+  missed_call: { windowMs: 30000, maxPerWindow: 3 },
+  friend_request: { windowMs: 5000, maxPerWindow: 3 },
+  world_mention: { windowMs: 10000, maxPerWindow: 3 },
+  system: { windowMs: 60000, maxPerWindow: 5 },
 };
 
 // ─── Metrics ────────────────────────────────────────────────────────────────
@@ -33,12 +42,15 @@ const pushMetrics = {
   failed: 0,
   tokensCleanedUp: 0,
   rateLimited: 0,
+  preferencesBlocked: 0,
   getStats() {
     return {
       push_sent: this.sent,
       push_failed: this.failed,
       push_tokens_cleaned: this.tokensCleanedUp,
       push_rate_limited: this.rateLimited,
+      push_prefs_blocked: this.preferencesBlocked,
+      ...fcmService.fcmMetrics.getStats(),
     };
   },
 };
@@ -89,78 +101,89 @@ function isRateLimited(userId, type) {
   return false;
 }
 
-// ─── Execute Push (with retry) ──────────────────────────────────────────────
-async function executePush({ tokens, title, body, data, priority, channelId }) {
-  if (!tokens || tokens.length === 0) return;
-
-  // Build Expo push messages
-  const messages = tokens.map((tokenEntry) => ({
-    to: tokenEntry.token,
-    title,
-    body,
-    data: data || {},
-    sound: priority === "high" ? "default" : undefined,
-    priority: priority || "default",
-    channelId: channelId || "messages",
-    badge: 1,
-  }));
-
-  // Batch in chunks of 100
-  for (let i = 0; i < messages.length; i += MAX_BATCH_SIZE) {
-    const batch = messages.slice(i, i + MAX_BATCH_SIZE);
-    await sendBatchWithRetry(batch, 0);
+// ─── Notification Preferences Check ─────────────────────────────────────────
+async function isPushAllowed(userId, type) {
+  try {
+    const prefs = await db.getNotificationPreference(userId, type);
+    // If no preference set, default to enabled
+    if (!prefs) return true;
+    return prefs.push_enabled !== false;
+  } catch (err) {
+    // On error, allow push (fail-open for notifications)
+    return true;
   }
 }
 
-async function sendBatchWithRetry(batch, attempt) {
-  try {
-    const response = await fetch(EXPO_PUSH_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(batch),
-    });
+// ─── Execute Push (FCM native) ──────────────────────────────────────────────
+async function executePush({
+  devices,
+  title,
+  body,
+  data,
+  priority,
+  channelId,
+  dataOnly,
+}) {
+  if (!devices || devices.length === 0) return;
 
-    const result = await response.json();
+  // Filter to only devices with FCM tokens
+  const fcmDevices = devices.filter(
+    (d) => d.push_token && (d.token_type === "fcm" || d.platform === "android"),
+  );
 
-    if (result.data) {
-      for (let i = 0; i < result.data.length; i++) {
-        const ticket = result.data[i];
-        if (ticket.status === "ok") {
-          pushMetrics.sent++;
-        } else if (ticket.status === "error") {
-          pushMetrics.failed++;
+  if (fcmDevices.length === 0) return;
 
-          // Auto-cleanup invalid tokens
-          if (
-            ticket.details &&
-            ticket.details.error === "DeviceNotRegistered"
-          ) {
-            const token = batch[i].to;
+  const options = {
+    title,
+    body,
+    data: data || {},
+    priority: priority || "normal",
+    channelId: channelId || "messages",
+    dataOnly: dataOnly || false,
+  };
+
+  // Retry wrapper
+  let attempt = 0;
+  while (attempt <= MAX_RETRIES) {
+    try {
+      const results = await fcmService.sendToDevices(
+        fcmDevices,
+        options,
+        // Callback for invalid token cleanup
+        async (token, deviceId) => {
+          try {
+            await db.deactivateDeviceByToken(token);
+            pushMetrics.tokensCleanedUp++;
             console.log(
-              `🧹 Removing invalid push token: ${token.slice(0, 20)}...`,
+              `🧹 Deactivated device with invalid token: ${token.slice(0, 20)}...`,
             );
-            try {
-              await db.deletePushToken(token);
-              pushMetrics.tokensCleanedUp++;
-            } catch (err) {
-              console.error("Token cleanup error:", err.message);
-            }
+          } catch (err) {
+            console.error("Device deactivation error:", err.message);
           }
+        },
+      );
+
+      // Count successes/failures
+      for (const result of results) {
+        if (result.success) {
+          pushMetrics.sent++;
+        } else {
+          pushMetrics.failed++;
         }
       }
-    }
-  } catch (err) {
-    if (attempt < MAX_RETRIES) {
-      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-      console.log(`Push retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms...`);
+
+      return results;
+    } catch (err) {
+      attempt++;
+      if (attempt > MAX_RETRIES) {
+        console.error("Push delivery failed after retries:", err.message);
+        pushMetrics.failed += fcmDevices.length;
+        return [];
+      }
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      console.log(`Push retry ${attempt}/${MAX_RETRIES} in ${delay}ms...`);
       await new Promise((r) => setTimeout(r, delay));
-      return sendBatchWithRetry(batch, attempt + 1);
     }
-    console.error("Push delivery failed after retries:", err.message);
-    pushMetrics.failed += batch.length;
   }
 }
 
@@ -168,20 +191,27 @@ async function sendBatchWithRetry(batch, attempt) {
 
 /**
  * Send push notification for a new message.
- * Only sends if recipient is offline.
+ * Only sends if recipient is offline and has push enabled.
  */
 async function sendMessagePush(recipientId, senderName, messagePreview) {
   if (isRateLimited(recipientId, "message")) return;
 
-  // Check if user is online (WebSocket connected) — skip push if online
+  // Check if user is online — skip push if online
   const online = await presence.isOnline(recipientId);
   if (online) return;
 
-  const tokens = await db.getPushTokens(recipientId);
-  if (tokens.length === 0) return;
+  // Check notification preferences
+  const allowed = await isPushAllowed(recipientId, "message");
+  if (!allowed) {
+    pushMetrics.preferencesBlocked++;
+    return;
+  }
+
+  const devices = await db.getActiveDevices(recipientId);
+  if (devices.length === 0) return;
 
   enqueuePush({
-    tokens,
+    devices,
     title: senderName,
     body:
       messagePreview.length > 100
@@ -191,30 +221,38 @@ async function sendMessagePush(recipientId, senderName, messagePreview) {
       type: "message",
       senderName,
     },
-    priority: "default",
+    priority: "normal",
     channelId: "messages",
   });
 }
 
 /**
  * Send high-priority push for incoming call.
- * Sends even for quick wake-up.
+ * Sends even if online (for wake-up on locked screen).
  */
-async function sendCallPush(targetUserId, callerId, callerName, callId) {
+async function sendCallPush(targetUserId, callerId, callerName, callId, callType = "video") {
   if (isRateLimited(targetUserId, "call")) return;
 
-  const tokens = await db.getPushTokens(targetUserId);
-  if (tokens.length === 0) return;
+  const allowed = await isPushAllowed(targetUserId, "call");
+  if (!allowed) {
+    pushMetrics.preferencesBlocked++;
+    return;
+  }
 
+  const devices = await db.getActiveDevices(targetUserId);
+  if (devices.length === 0) return;
+
+  const isVoice = callType === "voice";
   enqueuePush({
-    tokens,
-    title: "Incoming Call 📞",
+    devices,
+    title: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
     body: `${callerName} is calling you...`,
     data: {
       type: "call",
       callId,
       callerId,
       callerName,
+      callType,
     },
     priority: "high",
     channelId: "calls",
@@ -227,19 +265,68 @@ async function sendCallPush(targetUserId, callerId, callerName, callId) {
 async function sendMissedCallPush(targetUserId, callerName) {
   if (isRateLimited(targetUserId, "missed_call")) return;
 
-  const tokens = await db.getPushTokens(targetUserId);
-  if (tokens.length === 0) return;
+  const allowed = await isPushAllowed(targetUserId, "missed_call");
+  if (!allowed) {
+    pushMetrics.preferencesBlocked++;
+    return;
+  }
+
+  const devices = await db.getActiveDevices(targetUserId);
+  if (devices.length === 0) return;
 
   enqueuePush({
-    tokens,
+    devices,
     title: "Missed Call",
     body: `You missed a call from ${callerName}`,
     data: {
       type: "missed_call",
       callerName,
     },
-    priority: "default",
+    priority: "normal",
     channelId: "calls",
+  });
+}
+
+/**
+ * Send push for friend request.
+ */
+async function sendFriendRequestPush(targetUserId, senderName) {
+  if (isRateLimited(targetUserId, "friend_request")) return;
+
+  const allowed = await isPushAllowed(targetUserId, "friend_request");
+  if (!allowed) {
+    pushMetrics.preferencesBlocked++;
+    return;
+  }
+
+  const devices = await db.getActiveDevices(targetUserId);
+  if (devices.length === 0) return;
+
+  enqueuePush({
+    devices,
+    title: "Friend Request",
+    body: `${senderName} wants to connect with you`,
+    data: {
+      type: "friend_request",
+      senderName,
+    },
+    priority: "normal",
+    channelId: "messages",
+  });
+}
+
+/**
+ * Send silent data-only push (for badge sync, etc.).
+ */
+async function sendSilentPush(targetUserId, data) {
+  const devices = await db.getActiveDevices(targetUserId);
+  if (devices.length === 0) return;
+
+  enqueuePush({
+    devices,
+    data: { type: "silent", ...data },
+    dataOnly: true,
+    priority: "normal",
   });
 }
 
@@ -247,5 +334,7 @@ module.exports = {
   sendMessagePush,
   sendCallPush,
   sendMissedCallPush,
+  sendFriendRequestPush,
+  sendSilentPush,
   pushMetrics,
 };

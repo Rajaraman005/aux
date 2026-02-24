@@ -10,12 +10,16 @@ import {
   ScrollView,
   StyleSheet,
   Image,
+  Platform,
+  StatusBar,
 } from "react-native";
+import { BlurView } from "expo-blur";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useNavigation } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
 import CustomPopup from "../components/CustomPopup";
+import ProfilePictureViewer from "../components/ProfilePictureViewer";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
@@ -51,22 +55,46 @@ export default function SettingsScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [showLogoutPopup, setShowLogoutPopup] = useState(false);
+  const [showAvatarViewer, setShowAvatarViewer] = useState(false);
 
   return (
     <View style={styles.container}>
+      <StatusBar barStyle="dark-content" />
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingTop: insets.top + 20, paddingBottom: insets.bottom + 100 },
+          { paddingTop: 0, paddingBottom: 20 },
         ]}
         showsVerticalScrollIndicator={false}
       >
+        {/* ─── Premium Banner Background ─────────────────────────────────── */}
+        <View style={styles.bannerContainer}>
+          <Image
+            source={require("../../assets/banner.jpg")}
+            style={styles.bannerImage}
+            blurRadius={Platform.OS === "ios" ? 0 : 40}
+          />
+          {Platform.OS === "ios" && (
+            <BlurView
+              intensity={60}
+              style={StyleSheet.absoluteFill}
+              tint="light"
+            />
+          )}
+          <View style={styles.bannerOverlay} />
+        </View>
         {/* ─── Profile Header ─────────────────────────────────────── */}
         <View style={styles.profileSection}>
-          <View style={styles.avatarRing}>
+          <TouchableOpacity
+            style={styles.avatarRingPremium}
+            onPress={() => setShowAvatarViewer(true)}
+            activeOpacity={0.8}
+          >
             <Image
               source={{
-                uri: `${AVATAR_BASE}${encodeURIComponent(user?.name || "User")}`,
+                uri:
+                  user?.avatarUrl ||
+                  `${AVATAR_BASE}${encodeURIComponent(user?.name || "User")}`,
               }}
               style={styles.avatar}
             />
@@ -75,53 +103,56 @@ export default function SettingsScreen() {
                 <Icon name="lock" size={10} color="#fff" />
               </View>
             )}
-          </View>
+          </TouchableOpacity>
           <Text style={styles.userName}>{user?.name || "User"}</Text>
           <Text style={styles.userEmail}>{user?.email || ""}</Text>
         </View>
 
-        {/* ─── Menu Items ─────────────────────────────────────────── */}
-        <View style={styles.menuSection}>
-          {MENU_ITEMS.map((item, index) => (
-            <TouchableOpacity
-              key={item.key}
-              style={[
-                styles.menuRow,
-                index === MENU_ITEMS.length - 1 && { borderBottomWidth: 0 },
-              ]}
-              onPress={() => item.route && navigation.navigate(item.route)}
-              activeOpacity={0.6}
-            >
-              <Icon
-                name={item.icon}
-                size={22}
-                color="#1A1A2E"
-                style={styles.menuIcon}
-              />
-              <Text style={styles.menuLabel}>{item.label}</Text>
-              <Icon name="chevron-right" size={20} color="#C7C7CC" />
-            </TouchableOpacity>
-          ))}
+        {/* ─── Menu & Content (With Padding) ───────────────────────── */}
+        <View style={{ paddingHorizontal: 24 }}>
+          {/* ─── Menu Items ─────────────────────────────────────────── */}
+          <View style={styles.menuSection}>
+            {MENU_ITEMS.map((item, index) => (
+              <TouchableOpacity
+                key={item.key}
+                style={[
+                  styles.menuRow,
+                  index === MENU_ITEMS.length - 1 && { borderBottomWidth: 0 },
+                ]}
+                onPress={() => item.route && navigation.navigate(item.route)}
+                activeOpacity={0.6}
+              >
+                <Icon
+                  name={item.icon}
+                  size={22}
+                  color="#1A1A2E"
+                  style={styles.menuIcon}
+                />
+                <Text style={styles.menuLabel}>{item.label}</Text>
+                <Icon name="chevron-right" size={20} color="#C7C7CC" />
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* ─── Logout ─────────────────────────────────────────────── */}
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={() => setShowLogoutPopup(true)}
+            activeOpacity={0.6}
+          >
+            <Icon
+              name="log-out"
+              size={22}
+              color="#1A1A2E"
+              style={styles.menuIcon}
+            />
+            <Text style={styles.menuLabel}>Logout</Text>
+            <Icon name="chevron-right" size={20} color="#C7C7CC" />
+          </TouchableOpacity>
+
+          {/* ─── Version ────────────────────────────────────────────── */}
+          <Text style={styles.version}>Aux v1.0.1</Text>
         </View>
-
-        {/* ─── Logout ─────────────────────────────────────────────── */}
-        <TouchableOpacity
-          style={styles.menuRow}
-          onPress={() => setShowLogoutPopup(true)}
-          activeOpacity={0.6}
-        >
-          <Icon
-            name="log-out"
-            size={22}
-            color="#1A1A2E"
-            style={styles.menuIcon}
-          />
-          <Text style={styles.menuLabel}>Logout</Text>
-          <Icon name="chevron-right" size={20} color="#C7C7CC" />
-        </TouchableOpacity>
-
-        {/* ─── Version ────────────────────────────────────────────── */}
-        <Text style={styles.version}>Aux v1.0.1</Text>
       </ScrollView>
 
       {/* ─── Logout Confirmation ─────────────────────────────────── */}
@@ -145,6 +176,13 @@ export default function SettingsScreen() {
         ]}
         onClose={() => setShowLogoutPopup(false)}
       />
+
+      <ProfilePictureViewer
+        visible={showAvatarViewer}
+        imageUri={user?.avatarUrl}
+        userName={user?.name}
+        onClose={() => setShowAvatarViewer(false)}
+      />
     </View>
   );
 }
@@ -155,28 +193,46 @@ const styles = StyleSheet.create({
     backgroundColor: "#FAFAFA",
   },
   scrollContent: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 0,
   },
 
   // ─── Profile Header ───────────────────────────────────────────
   profileSection: {
     alignItems: "center",
-    marginBottom: 36,
-    marginTop: 12,
+    marginBottom: 8,
   },
-  avatarRing: {
+  avatarRingPremium: {
     position: "relative",
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    backgroundColor: "#F0EDE8",
-    padding: 4,
-    marginBottom: 16,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: "#fff",
+    padding: 5,
+    elevation: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    marginTop: -60,
+    marginBottom: 0,
   },
   avatar: {
     width: "100%",
     height: "100%",
-    borderRadius: 50,
+    borderRadius: 55,
+  },
+  bannerContainer: {
+    height: 200,
+    backgroundColor: "#F0EDE8",
+    width: "100%",
+  },
+  bannerImage: {
+    width: "100%",
+    height: "100%",
+  },
+  bannerOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(255,255,255,0.3)",
   },
   verifiedBadge: {
     position: "absolute",

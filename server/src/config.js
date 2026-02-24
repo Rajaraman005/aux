@@ -57,6 +57,13 @@ const config = {
     api: { windowMs: 60 * 1000, max: 100 },
     call: { windowMs: 60 * 1000, max: 10 },
   },
+
+  // ─── Firebase Cloud Messaging (Native Push) ───────────────────────────
+  fcm: {
+    projectId: process.env.FCM_PROJECT_ID,
+    serviceAccountPath:
+      process.env.FCM_SERVICE_ACCOUNT_PATH || "./fcm-service-account.json",
+  },
 };
 
 /**

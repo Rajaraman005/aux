@@ -247,8 +247,8 @@ class SignalingClient {
   }
 
   // ─── Signaling Helpers ────────────────────────────────────────────────────
-  requestCall(targetUserId) {
-    return this.send({ type: "call-request", targetUserId });
+  requestCall(targetUserId, callType = "video") {
+    return this.send({ type: "call-request", targetUserId, callType });
   }
 
   acceptCall(callId) {
@@ -293,9 +293,28 @@ class SignalingClient {
     return this.send({ type: "call-status", callId });
   }
 
+  sendCallModeSwitch(callId, mode) {
+    return this.send({ type: "call-mode-switch", callId, mode });
+  }
+
   // ─── Chat Helpers ───────────────────────────────────────────────────────────
-  sendChatMessage(conversationId, content, tempId) {
-    return this.send({ type: "chat-message", conversationId, content, tempId });
+  sendChatMessage(conversationId, content, tempId, media = null) {
+    return this.send({
+      type: "chat-message",
+      conversationId,
+      content,
+      tempId,
+      ...(media && {
+        media_url: media.url,
+        media_type: media.mediaType,
+        media_thumbnail: media.thumbnailUrl,
+        media_width: media.width,
+        media_height: media.height,
+        media_duration: media.duration,
+        media_size: media.size,
+        media_mime_type: media.mimeType,
+      }),
+    });
   }
 
   sendTyping(conversationId) {
@@ -307,8 +326,22 @@ class SignalingClient {
   }
 
   // ─── World Chat Helpers ─────────────────────────────────────────────────────
-  sendWorldMessage(content, tempId) {
-    return this.send({ type: "world-message", content, tempId });
+  sendWorldMessage(content, tempId, media = null) {
+    return this.send({
+      type: "world-message",
+      content,
+      tempId,
+      ...(media && {
+        media_url: media.url,
+        media_type: media.mediaType,
+        media_thumbnail: media.thumbnailUrl,
+        media_width: media.width,
+        media_height: media.height,
+        media_duration: media.duration,
+        media_size: media.size,
+        media_mime_type: media.mimeType,
+      }),
+    });
   }
 }
 

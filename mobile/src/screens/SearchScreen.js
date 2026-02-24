@@ -16,6 +16,7 @@ import {
   Modal,
   Image,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { useAuth } from "../context/AuthContext";
 import { useSignaling } from "../context/SignalingContext";
@@ -25,16 +26,20 @@ import signalingClient from "../services/socket";
 import callManager from "../services/CallManager";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 import CustomPopup from "../components/CustomPopup";
+import ProfilePictureViewer from "../components/ProfilePictureViewer";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
 export default function SearchScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { onlineUsers } = useSignaling();
   const [users, setUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [isSearching, setIsSearching] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
+  const [avatarViewerUser, setAvatarViewerUser] = useState(null);
   const modalAnim = useRef(new Animated.Value(0)).current;
   const [expandedCardId, setExpandedCardId] = useState(null);
   const [popup, setPopup] = useState({
@@ -44,14 +49,10 @@ export default function SearchScreen({ navigation }) {
   });
 
   // ─── Fetch Users ───────────────────────────────────────────────────────
-  const fetchUsers = useCallback(async () => {
+  // Initial load (no query) — shows full spinner on first open only
+  const fetchInitial = useCallback(async () => {
     try {
-      const url =
-        searchQuery.length >= 2
-          ? `${endpoints.users.search}?q=${encodeURIComponent(searchQuery)}`
-          : endpoints.users.list;
-      const data = await apiClient.get(url);
-      // Map backend field names to frontend field names
+      const data = await apiClient.get(endpoints.users.list);
       const mapped = (data.users || []).map((u) => ({
         ...u,
         friendRequestStatus: u.friendStatus || u.friendRequestStatus || null,
@@ -62,27 +63,56 @@ export default function SearchScreen({ navigation }) {
     } finally {
       setIsLoading(false);
     }
-  }, [searchQuery]);
+  }, []);
 
   useEffect(() => {
-    setIsLoading(true);
-    const timer = setTimeout(fetchUsers, searchQuery ? 300 : 0);
-    return () => clearTimeout(timer);
-  }, [fetchUsers]);
+    fetchInitial();
+  }, [fetchInitial]);
 
-  // Refresh data when screen gains focus (e.g. after accepting a request)
   useFocusEffect(
     useCallback(() => {
-      fetchUsers();
-    }, [fetchUsers]),
+      fetchInitial();
+    }, [fetchInitial]),
   );
+
+  // ─── Search with debounce — never replaces list, just filters/updates ──
+  useEffect(() => {
+    if (!searchQuery) {
+      setIsSearching(false);
+      // Reset to full list when query cleared
+      fetchInitial();
+      return;
+    }
+    if (searchQuery.length < 2) {
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const url = `${endpoints.users.search}?q=${encodeURIComponent(searchQuery)}`;
+        const data = await apiClient.get(url);
+        const mapped = (data.users || []).map((u) => ({
+          ...u,
+          friendRequestStatus: u.friendStatus || u.friendRequestStatus || null,
+        }));
+        setUsers(mapped);
+      } catch (err) {
+        console.error("Search error:", err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, fetchInitial]);
 
   // ─── Profile Modal Animation ──────────────────────────────────────────
   useEffect(() => {
-    Animated.spring(modalAnim, {
+    Animated.timing(modalAnim, {
       toValue: selectedUser ? 1 : 0,
-      damping: 20,
-      stiffness: 300,
+      duration: 200,
       useNativeDriver: true,
     }).start();
   }, [selectedUser]);
@@ -113,6 +143,9 @@ export default function SearchScreen({ navigation }) {
           // Navigate to CallScreen if not already there
           navigation.navigate("Call", {
             callerName: targetUser.name,
+            callerAvatar:
+              targetUser.avatarUrl ||
+              `${AVATAR_BASE}${encodeURIComponent(targetUser.name)}`,
           });
           unsub();
         } else if (state === "failed" || state === "ended") {
@@ -205,8 +238,12 @@ export default function SearchScreen({ navigation }) {
   const renderUserCard = ({ item }) => {
     const isOnline = onlineUsers.has(item.id);
     const isPrivate = item.isPrivate;
-    const friendStatus = item.friendRequestStatus; // 'accepted', 'pending', null
-    const isFriend = friendStatus === "accepted";
+    const friendStatus = item.friendRequestStatus;
+    // Accept all variants the server might return for an accepted friendship
+    const isFriend =
+      friendStatus === "accepted" ||
+      friendStatus === "friends" ||
+      friendStatus === "friend";
     const canInteract = !isPrivate || isFriend; // Can message/call only if public or friend
     const isExpanded = expandedCardId === item.id;
     return (
@@ -225,7 +262,11 @@ export default function SearchScreen({ navigation }) {
         >
           <View style={styles.avatarContainer}>
             <Image
-              source={{ uri: `${AVATAR_BASE}${encodeURIComponent(item.name)}` }}
+              source={{
+                uri:
+                  item.avatarUrl ||
+                  `${AVATAR_BASE}${encodeURIComponent(item.name)}`,
+              }}
               style={styles.avatar}
             />
             <View
@@ -321,7 +362,7 @@ export default function SearchScreen({ navigation }) {
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <TouchableOpacity
           onPress={() => navigation.goBack()}
           style={styles.backBtn}
@@ -358,7 +399,15 @@ export default function SearchScreen({ navigation }) {
         ) : null}
       </View>
 
-      {/* User List */}
+      {/* Search activity indicator — shown inline, never removes list */}
+      {isSearching && (
+        <View style={styles.searchingRow}>
+          <ActivityIndicator size="small" color={colors.textMuted} />
+          <Text style={styles.searchingText}>Searching...</Text>
+        </View>
+      )}
+
+      {/* User List — always mounted, never unmounts on search */}
       {isLoading ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={colors.primary} />
@@ -370,13 +419,16 @@ export default function SearchScreen({ navigation }) {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
           ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Icon name="users" size={48} color={colors.textMuted} />
-              <Text style={styles.emptyText}>
-                {searchQuery ? "No users found" : "No contacts yet"}
-              </Text>
-            </View>
+            !isSearching ? (
+              <View style={styles.emptyContainer}>
+                <Icon name="users" size={48} color={colors.textMuted} />
+                <Text style={styles.emptyText}>
+                  {searchQuery ? "No users found" : "No contacts yet"}
+                </Text>
+              </View>
+            ) : null
           }
         />
       )}
@@ -411,11 +463,17 @@ export default function SearchScreen({ navigation }) {
           >
             {selectedUser && (
               <>
-                {/* Avatar with accent ring */}
-                <View style={styles.avatarRing}>
+                {/* Avatar with accent ring — tap to view full size */}
+                <TouchableOpacity
+                  style={styles.avatarRing}
+                  onPress={() => setAvatarViewerUser(selectedUser)}
+                  activeOpacity={0.8}
+                >
                   <Image
                     source={{
-                      uri: `${AVATAR_BASE}${encodeURIComponent(selectedUser.name)}`,
+                      uri:
+                        selectedUser.avatarUrl ||
+                        `${AVATAR_BASE}${encodeURIComponent(selectedUser.name)}`,
                     }}
                     style={styles.profileAvatar}
                   />
@@ -430,14 +488,16 @@ export default function SearchScreen({ navigation }) {
                       },
                     ]}
                   />
-                </View>
+                </TouchableOpacity>
 
                 {/* Name */}
                 <Text style={styles.profileName}>{selectedUser.name}</Text>
 
                 {/* Bio */}
                 {selectedUser.bio ? (
-                  <Text style={styles.profileBio}>{selectedUser.bio}</Text>
+                  <Text style={styles.profileBio} numberOfLines={0}>
+                    {selectedUser.bio}
+                  </Text>
                 ) : null}
 
                 {/* Status pill */}
@@ -478,12 +538,6 @@ export default function SearchScreen({ navigation }) {
                 {/* Action Buttons — circular icons */}
                 <View style={styles.actionRow}>
                   <TouchableOpacity
-                    style={styles.actionCircle}
-                    onPress={() => handleMessageUser(selectedUser)}
-                  >
-                    <Icon name="message-circle" size={22} color="#fff" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
                     style={[
                       styles.actionCircle,
                       styles.actionCircleCall,
@@ -495,12 +549,18 @@ export default function SearchScreen({ navigation }) {
                   >
                     <Icon name="phone" size={22} color="#fff" />
                   </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.actionCircle}
+                    onPress={() => handleMessageUser(selectedUser)}
+                  >
+                    <Icon name="message-circle" size={22} color="#fff" />
+                  </TouchableOpacity>
                 </View>
 
                 {/* Labels under buttons */}
                 <View style={styles.actionLabelRow}>
-                  <Text style={styles.actionLabel}>Message</Text>
                   <Text style={styles.actionLabel}>Call</Text>
+                  <Text style={styles.actionLabel}>Message</Text>
                 </View>
               </>
             )}
@@ -516,6 +576,14 @@ export default function SearchScreen({ navigation }) {
         buttons={popup.buttons}
         onClose={() => setPopup({ visible: false, title: "", message: "" })}
       />
+
+      {/* Profile Picture Viewer */}
+      <ProfilePictureViewer
+        visible={!!avatarViewerUser}
+        imageUri={avatarViewerUser?.avatarUrl}
+        userName={avatarViewerUser?.name}
+        onClose={() => setAvatarViewerUser(null)}
+      />
     </View>
   );
 }
@@ -529,7 +597,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: spacing.lg,
-    paddingTop: 60,
+    paddingTop: 0,
     paddingBottom: spacing.md,
     gap: 12,
   },
@@ -567,6 +635,20 @@ const styles = StyleSheet.create({
   },
   clearBtn: {
     padding: spacing.sm,
+  },
+
+  // Search indicator
+  searchingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.lg,
+    paddingBottom: 6,
+    gap: 6,
+  },
+  searchingText: {
+    fontSize: 13,
+    color: colors.textMuted,
+    fontWeight: "500",
   },
 
   // List
@@ -718,8 +800,8 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(0,0,0,0.45)",
   },
   profileModal: {
-    width: "80%",
-    maxWidth: 300,
+    width: "85%",
+    maxWidth: 320,
     backgroundColor: "#fff",
     borderRadius: 24,
     paddingTop: 32,
@@ -765,6 +847,9 @@ const styles = StyleSheet.create({
     color: "#8E8E93",
     fontStyle: "italic",
     marginBottom: 4,
+    textAlign: "center",
+    lineHeight: 20,
+    alignSelf: "stretch",
   },
   profileStatus: {
     flexDirection: "row",
@@ -811,7 +896,7 @@ const styles = StyleSheet.create({
     gap: 24,
   },
   actionLabel: {
-    width: 52,
+    width: 64,
     textAlign: "center",
     fontSize: 11,
     fontWeight: "500",

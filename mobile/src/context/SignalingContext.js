@@ -5,6 +5,7 @@
  *
  * ★ Auto-clears zombie incoming calls on call-ended / call-rejected / call-failed.
  * ★ Exposes callManager for centralized call lifecycle control.
+ * ★ Real-time profile updates: broadcasts avatar changes across devices.
  */
 import React, {
   createContext,
@@ -17,6 +18,7 @@ import React, {
 import signalingClient from "../services/socket";
 import callManager from "../services/CallManager";
 import SoundService from "../services/sounds";
+import { cancelCallNotification } from "../services/notifications";
 import { useAuth } from "./AuthContext";
 
 const SignalingContext = createContext(null);
@@ -26,6 +28,8 @@ export function SignalingProvider({ children }) {
   const [onlineUsers, setOnlineUsers] = useState(new Set());
   const [incomingCall, setIncomingCall] = useState(null);
   const [unreadNotifCount, setUnreadNotifCount] = useState(0);
+  // Real-time profile updates from other users (userId -> { avatarUrl, name, timestamp })
+  const [profileUpdates, setProfileUpdates] = useState(new Map());
   // Track which conversation the user is currently viewing (set by ChatScreen)
   const activeConversationRef = useRef(null);
 
@@ -56,7 +60,7 @@ export function SignalingProvider({ children }) {
         signalingClient.rejectCall(data.callId, "busy");
         return;
       }
-      setIncomingCall(data);
+      setIncomingCall({ ...data, callType: data.callType || "video" });
       SoundService.playRingtone();
     });
 
@@ -65,6 +69,7 @@ export function SignalingProvider({ children }) {
       setIncomingCall((prev) => {
         if (prev && prev.callId === msg.callId) {
           SoundService.stopRingtone();
+          cancelCallNotification();
           return null;
         }
         return prev;
@@ -94,6 +99,19 @@ export function SignalingProvider({ children }) {
       SoundService.playMessage();
     });
 
+    // ★ Listen for real-time profile updates (avatar changes from other users)
+    const unsubProfile = signalingClient.on("profile-updated", (data) => {
+      setProfileUpdates((prev) => {
+        const next = new Map(prev);
+        next.set(data.userId, {
+          avatarUrl: data.avatarUrl,
+          name: data.name,
+          timestamp: data.timestamp,
+        });
+        return next;
+      });
+    });
+
     return () => {
       unsubPresence();
       unsubList();
@@ -103,6 +121,7 @@ export function SignalingProvider({ children }) {
       unsubAutoFail();
       unsubNotif();
       unsubMsg();
+      unsubProfile();
       SoundService.cleanup();
       signalingClient.disconnect();
     };
@@ -126,6 +145,7 @@ export function SignalingProvider({ children }) {
     unreadNotifCount,
     setUnreadNotifCount,
     setActiveConversation,
+    profileUpdates,
   };
 
   return (

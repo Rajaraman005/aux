@@ -37,6 +37,7 @@ import {
   initializeNotifications,
   cleanupNotifications,
 } from "./src/services/notifications";
+import { InAppNotificationProvider } from "./src/components/InAppNotification";
 import { colors, typography, shadows, spacing } from "./src/styles/theme";
 
 // Screens
@@ -53,7 +54,10 @@ import RequestsScreen from "./src/screens/RequestsScreen";
 import SettingsScreen from "./src/screens/SettingsScreen";
 import WorldScreen from "./src/screens/WorldScreen";
 import ProfileScreen from "./src/screens/ProfileScreen";
+import ImageEditorScreen from "./src/screens/ImageEditorScreen";
+import MediaPreviewScreen from "./src/screens/MediaPreviewScreen";
 import NotificationsScreen from "./src/screens/NotificationsScreen";
+import NotificationPreferencesScreen from "./src/screens/NotificationPreferencesScreen";
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -256,8 +260,31 @@ function MainStack({ navigationRef }) {
           options={{ animation: "slide_from_right" }}
         />
         <Stack.Screen
+          name="ImageEditor"
+          component={ImageEditorScreen}
+          options={{
+            animation: "slide_from_bottom",
+            presentation: "fullScreenModal",
+            gestureEnabled: false,
+          }}
+        />
+        <Stack.Screen
+          name="MediaPreview"
+          component={MediaPreviewScreen}
+          options={{
+            animation: "slide_from_bottom",
+            presentation: "fullScreenModal",
+            gestureEnabled: false,
+          }}
+        />
+        <Stack.Screen
           name="Notifications"
           component={NotificationsScreen}
+          options={{ animation: "slide_from_right" }}
+        />
+        <Stack.Screen
+          name="NotificationPreferences"
+          component={NotificationPreferencesScreen}
           options={{ animation: "slide_from_right" }}
         />
       </Stack.Navigator>
@@ -269,7 +296,7 @@ function MainStack({ navigationRef }) {
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 
 function IncomingCallOverlay({ navigationRef }) {
-  const { incomingCall, clearIncomingCall } = useSignaling();
+  const { incomingCall, clearIncomingCall, profileUpdates } = useSignaling();
 
   const handleAccept = () => {
     if (!incomingCall) return;
@@ -277,8 +304,18 @@ function IncomingCallOverlay({ navigationRef }) {
     callManager.acceptIncomingCall(incomingCall);
     clearIncomingCall();
     if (navigationRef?.current) {
+      const liveProf = profileUpdates.get(incomingCall.callerId);
+      const rawAvatar = liveProf?.avatarUrl
+        ? `${liveProf.avatarUrl}?t=${liveProf.timestamp}`
+        : incomingCall.callerAvatar;
+      const avatarUri = rawAvatar?.startsWith("http")
+        ? rawAvatar
+        : `${AVATAR_BASE}${encodeURIComponent(incomingCall.callerName || "User")}`;
+
       navigationRef.current.navigate("Call", {
         callerName: incomingCall.callerName,
+        callerAvatar: avatarUri,
+        callType: incomingCall.callType || "video",
       });
     }
   };
@@ -292,9 +329,14 @@ function IncomingCallOverlay({ navigationRef }) {
 
   if (!incomingCall) return null;
 
-  const avatarUri = `${AVATAR_BASE}${encodeURIComponent(
-    incomingCall.callerName || "User",
-  )}`;
+  const liveProf = profileUpdates.get(incomingCall.callerId);
+  const rawAvatar = liveProf?.avatarUrl
+    ? `${liveProf.avatarUrl}?t=${liveProf.timestamp}`
+    : incomingCall.callerAvatar;
+  const avatarUri = rawAvatar?.startsWith("http")
+    ? rawAvatar
+    : `${AVATAR_BASE}${encodeURIComponent(incomingCall.callerName || "User")}`;
+  const isVoice = incomingCall.callType === "voice";
 
   return (
     <Modal visible transparent animationType="slide">
@@ -306,7 +348,9 @@ function IncomingCallOverlay({ navigationRef }) {
           <View style={styles.avatarRing}>
             <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
           </View>
-          <Text style={styles.incomingCallLabel}>Incoming Call</Text>
+          <Text style={styles.incomingCallLabel}>
+            {isVoice ? "Incoming Voice Call" : "Incoming Video Call"}
+          </Text>
           <Text style={styles.incomingCallerName}>
             {incomingCall.callerName}
           </Text>
@@ -320,7 +364,7 @@ function IncomingCallOverlay({ navigationRef }) {
               onPress={handleAccept}
               activeOpacity={0.8}
             >
-              <Icon name="phone" size={32} color="#fff" />
+              <Icon name={isVoice ? "phone" : "video"} size={32} color="#fff" />
             </TouchableOpacity>
             <Text style={styles.actionLabel}>Accept</Text>
           </View>
@@ -392,11 +436,13 @@ function RootNavigator() {
           },
         }}
       >
-        {isAuthenticated ? (
-          <MainStack navigationRef={navigationRef} />
-        ) : (
-          <AuthStack />
-        )}
+        <InAppNotificationProvider navigationRef={navigationRef}>
+          {isAuthenticated ? (
+            <MainStack navigationRef={navigationRef} />
+          ) : (
+            <AuthStack />
+          )}
+        </InAppNotificationProvider>
       </NavigationContainer>
     </>
   );

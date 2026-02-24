@@ -156,7 +156,7 @@ class CallManager {
   }
 
   // ─── Initiate Outbound Call ─────────────────────────────────────────────
-  startCall(targetUserId, targetName) {
+  startCall(targetUserId, targetName, callType = "video") {
     // ★ Auto-recover from terminal states (ENDED/FAILED)
     //   This handles the race where the 1500ms ENDED→IDLE auto-transition
     //   hasn't completed yet when the user tries to make a new call.
@@ -177,6 +177,7 @@ class CallManager {
       role: "caller",
       remoteName: targetName,
       remoteUserId: targetUserId,
+      callType, // "voice" or "video"
       startedAt: null,
       hasEnded: false,
     };
@@ -187,7 +188,7 @@ class CallManager {
     this._startCallingTimeout();
 
     // Request call via signaling
-    signalingClient.requestCall(targetUserId);
+    signalingClient.requestCall(targetUserId, callType);
     this._touchWatchdog();
 
     return true;
@@ -211,6 +212,7 @@ class CallManager {
       role: "callee",
       remoteName: callData.callerName,
       remoteUserId: callData.callerId,
+      callType: callData.callType || "video",
       startedAt: null,
       hasEnded: false,
     };
@@ -423,6 +425,29 @@ class CallManager {
       }),
     );
 
+    // ★ Remote peer switched call mode (voice↔video)
+    this._pushUnsub(
+      signalingClient.on("call-mode-switch", (msg) => {
+        if (msg.callId === callId() && this._session) {
+          const newMode = msg.mode;
+          this._session.callType = newMode;
+          if (newMode === "voice") {
+            webrtcEngine.switchToAudioOnly();
+            this._emit("modeSwitch", {
+              mode: "audio_only",
+              reason: "remote_switched",
+            });
+          } else {
+            webrtcEngine.switchToVideoMode();
+            this._emit("modeSwitch", {
+              mode: "video",
+              reason: "remote_switched",
+            });
+          }
+        }
+      }),
+    );
+
     // Remote hung up
     this._pushUnsub(
       signalingClient.on("call-ended", (msg) => {
@@ -552,7 +577,8 @@ class CallManager {
         this._emit("statsUpdate", data);
       };
 
-      await webrtcEngine.initialize(this._session.callId, isCaller);
+      const videoEnabled = this._session.callType === "video";
+      await webrtcEngine.initialize(this._session.callId, isCaller, videoEnabled);
       networkMonitor.start(this._session.callId);
 
       if (isCaller) {
@@ -605,6 +631,29 @@ class CallManager {
 
   switchCamera() {
     return webrtcEngine.switchCamera();
+  }
+
+  /**
+   * Switch call mode mid-call (voice↔video).
+   * @param {"voice"|"video"} newType
+   */
+  switchCallType(newType) {
+    if (!this._session || !this.isActive) return false;
+    if (this._session.callType === newType) return false;
+
+    this._session.callType = newType;
+
+    if (newType === "voice") {
+      webrtcEngine.switchToAudioOnly();
+      this._emit("modeSwitch", { mode: "audio_only", reason: "user_switched" });
+    } else {
+      webrtcEngine.switchToVideoMode();
+      this._emit("modeSwitch", { mode: "video", reason: "user_switched" });
+    }
+
+    // Notify remote peer via signaling
+    signalingClient.sendCallModeSwitch(this._session.callId, newType);
+    return true;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

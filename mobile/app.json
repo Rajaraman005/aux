@@ -9,19 +9,14 @@
     "splash": {
       "backgroundColor": "#0a0a1a"
     },
-    "assetBundlePatterns": [
-      "**/*"
-    ],
+    "assetBundlePatterns": ["**/*"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aux.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Aux needs camera access for video calls",
         "NSMicrophoneUsageDescription": "Aux needs microphone access for audio calls",
-        "UIBackgroundModes": [
-          "voip",
-          "audio"
-        ]
+        "UIBackgroundModes": ["voip", "audio"]
       },
       "bitcode": false
     },
@@ -38,7 +33,9 @@
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.WAKE_LOCK",
-        "android.permission.BLUETOOTH"
+        "android.permission.BLUETOOTH",
+        "android.permission.USE_FULL_SCREEN_INTENT",
+        "android.permission.VIBRATE"
       ]
     },
     "plugins": [
@@ -47,18 +44,11 @@
         {
           "cameraPermission": "Aux needs camera access for video calls",
           "microphonePermission": "Aux needs microphone access for audio calls",
-          "androidAbiFilters": [
-            "arm64-v8a"
-          ]
+          "androidAbiFilters": ["arm64-v8a"]
         }
       ],
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/icon.png",
-          "color": "#6C63FF"
-        }
-      ]
+      "@react-native-firebase/app",
+      "@react-native-firebase/messaging"
     ],
     "extra": {
       "eas": {

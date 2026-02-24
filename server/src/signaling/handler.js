@@ -146,6 +146,9 @@ function initializeSignaling(wss) {
           case "ice-restart":
             await handleIceRestart(userId, message);
             break;
+          case "call-mode-switch":
+            await handleCallModeSwitch(userId, message);
+            break;
           case "call-metrics":
             await handleCallMetrics(message);
             break;
@@ -226,7 +229,8 @@ function initializeSignaling(wss) {
 // ─── Message Handlers ────────────────────────────────────────────────────────
 
 async function handleCallRequest(callerId, callerName, message, callerWs) {
-  const { targetUserId } = message;
+  const { targetUserId, callType: rawCallType } = message;
+  const callType = rawCallType === "voice" ? "voice" : "video";
 
   if (!targetUserId) {
     callerWs.send(
@@ -239,11 +243,15 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     return;
   }
 
+  // Get caller's avatar
+  const user = await db.getUserById(callerId);
+  const callerAvatar = user?.avatar_url || user?.avatar_seed || callerId;
+
   // Check if target is online
   const targetOnline = await presence.isOnline(targetUserId);
   if (!targetOnline) {
     // Send high-priority push notification for incoming call
-    await sendCallPush(targetUserId, callerId, callerName, uuidv4());
+    await sendCallPush(targetUserId, callerId, callerName, uuidv4(), callType);
     callerWs.send(
       JSON.stringify({
         type: "call-failed",
@@ -283,6 +291,7 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     callerId,
     calleeId: targetUserId,
     callerName,
+    callType,
     startedAt: Date.now(),
     state: "ringing", // ringing -> connecting -> active -> ended
   });
@@ -295,6 +304,8 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     callId,
     callerId,
     callerName,
+    callerAvatar,
+    callType,
     timestamp: Date.now(),
   });
 
@@ -304,6 +315,7 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
       type: "call-ringing",
       callId,
       targetUserId,
+      callType,
     }),
   );
 
@@ -431,6 +443,25 @@ async function handleIceRestart(userId, message) {
   });
 }
 
+async function handleCallModeSwitch(userId, message) {
+  const { callId, mode } = message; // mode: "voice" or "video"
+  const call = activeCalls.get(callId);
+  if (!call || call.state === "ended") return;
+
+  // Update stored call type
+  if (mode === "voice" || mode === "video") {
+    call.callType = mode;
+  }
+
+  const targetId = call.callerId === userId ? call.calleeId : call.callerId;
+  await presence.sendToUser(targetId, {
+    type: "call-mode-switch",
+    callId,
+    mode,
+    fromUserId: userId,
+  });
+}
+
 async function handleHangUp(userId, message) {
   const { callId } = message;
   const call = activeCalls.get(callId);
@@ -523,16 +554,40 @@ async function finalizeCall(callId, reason) {
 // ─── Chat Message Handlers ──────────────────────────────────────────────────
 
 async function handleChatMessage(userId, userName, message, ws) {
-  const { conversationId, content, tempId } = message;
-  if (!conversationId || !content || content.trim().length === 0) return;
-  if (content.length > 5000) return;
+  const {
+    conversationId,
+    content,
+    tempId,
+    media_url,
+    media_type,
+    media_thumbnail,
+    media_width,
+    media_height,
+    media_duration,
+    media_size,
+    media_mime_type,
+  } = message;
+
+  // Require either content or media
+  const hasContent = content && content.trim().length > 0;
+  const hasMedia = media_url && media_type;
+  if (!conversationId || (!hasContent && !hasMedia)) return;
+  if (content && content.length > 5000) return;
 
   try {
-    // Save to database
+    // Save to database (with optional media fields)
     const savedMessage = await db.createMessage({
       conversation_id: conversationId,
       sender_id: userId,
-      content: content.trim(),
+      content: hasContent ? content.trim() : null,
+      media_url: media_url || null,
+      media_type: media_type || null,
+      media_thumbnail: media_thumbnail || null,
+      media_width: media_width || null,
+      media_height: media_height || null,
+      media_duration: media_duration || null,
+      media_size: media_size || null,
+      media_mime_type: media_mime_type || null,
     });
 
     // Confirm to sender (maps tempId to permanent ID)
@@ -554,8 +609,13 @@ async function handleChatMessage(userId, userName, message, ws) {
           message: { ...savedMessage, senderName: userName },
         });
 
-        // Also send push notification (pushService internally checks if user is offline)
-        await sendMessagePush(participantId, userName, content.trim());
+        // Push notification — show media type if no text
+        const pushText = hasContent
+          ? content.trim()
+          : media_type === "video"
+            ? "Video"
+            : "Photo";
+        await sendMessagePush(participantId, userName, pushText);
       }
     }
   } catch (err) {
@@ -612,17 +672,39 @@ async function handleMessageRead(userId, message) {
 }
 
 async function handleWorldMessage(userId, userName, message, ws, wss) {
-  const { content, tempId } = message;
-  if (!content || content.trim().length === 0) return;
-  if (content.length > 1000) return;
+  const {
+    content,
+    tempId,
+    media_url,
+    media_type,
+    media_thumbnail,
+    media_width,
+    media_height,
+    media_duration,
+    media_size,
+    media_mime_type,
+  } = message;
+
+  const hasContent = content && content.trim().length > 0;
+  const hasMedia = media_url && media_type;
+  if (!hasContent && !hasMedia) return;
+  if (content && content.length > 1000) return;
 
   try {
     const user = await db.getUserById(userId);
     const savedMessage = await db.createWorldMessage({
       sender_id: userId,
       sender_name: userName,
-      sender_avatar: user?.avatar_seed || userId,
-      content: content.trim(),
+      sender_avatar: user?.avatar_url || user?.avatar_seed || userId,
+      content: hasContent ? content.trim() : null,
+      media_url: media_url || null,
+      media_type: media_type || null,
+      media_thumbnail: media_thumbnail || null,
+      media_width: media_width || null,
+      media_height: media_height || null,
+      media_duration: media_duration || null,
+      media_size: media_size || null,
+      media_mime_type: media_mime_type || null,
     });
 
     // Confirm to sender (maps tempId → real ID)

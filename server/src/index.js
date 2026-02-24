@@ -64,6 +64,12 @@ app.use("/api/world", require("./routes/world"));
 app.use("/api/push", require("./routes/pushRoutes"));
 app.use("/api/friends", require("./routes/friends"));
 app.use("/api/notifications", require("./routes/notifications"));
+app.use(
+  "/api/notifications/preferences",
+  require("./routes/notificationPrefsRoutes"),
+);
+app.use("/api/media", require("./routes/mediaRoutes"));
+app.use("/api/calls", require("./routes/calls"));
 
 // ─── Health Check ────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
