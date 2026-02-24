@@ -35,7 +35,7 @@ jobs:
         run: npm ci
 
       - name: Expo prebuild
-        run: npx expo prebuild --clean
+        run: npx expo prebuild --clean --platform android
 
       - name: Add Notifee Maven repo
         run: |
