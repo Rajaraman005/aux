@@ -45,11 +45,11 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease -x lint -x test --no-daemon
+          ./gradlew assembleDebug -x lint -x test --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: aux-release-apk
-          path: mobile/android/app/build/outputs/apk/release/*.apk
+          name: aux-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
