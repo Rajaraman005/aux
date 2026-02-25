@@ -223,7 +223,7 @@ async function displayCallNotification(data) {
         category: AndroidCategory?.CALL,
         importance: AndroidImportance.HIGH,
         visibility: AndroidVisibility.PUBLIC,
-        smallIcon: "ic_notification",
+        smallIcon: "notification_icon",
         ongoing: true,
         autoCancel: false,
         vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
@@ -278,7 +278,7 @@ async function displayForegroundNotification(remoteMessage) {
       data,
       android: {
         channelId,
-        smallIcon: "ic_notification",
+        smallIcon: "notification_icon",
         pressAction: { id: "default" },
         importance:
           data.type === "call"
@@ -306,16 +306,17 @@ function handleNotificationNavigation(data, navigationRef) {
       break;
 
     case "call":
-      if (data.acceptFromNotification) {
-        navigationRef.current.navigate("Call", {
-          callerName: data.callerName || "Unknown",
-          callerAvatar: data.callerAvatar || null,
-          callType: data.callType || "video",
-          acceptFromNotification: true,
-        });
-      } else {
-        navigationRef.current.navigate("MainTabs", { screen: "Home" });
-      }
+      // Navigate to Call screen — either auto-accept (from Notifee action)
+      // or show incoming call UI (from FCM notification tap on killed app)
+      navigationRef.current.navigate("Call", {
+        callId: data.callId || null,
+        callerId: data.callerId || null,
+        callerName: data.callerName || "Unknown",
+        callerAvatar: data.callerAvatar || null,
+        callType: data.callType || "video",
+        acceptFromNotification: data.acceptFromNotification || false,
+        fromPushNotification: true,
+      });
       break;
     case "missed_call":
       navigationRef.current.navigate("MainTabs", { screen: "Home" });
@@ -333,6 +334,13 @@ function handleNotificationNavigation(data, navigationRef) {
       navigationRef.current.navigate("Notifications");
       break;
   }
+}
+
+// ─── Active Conversation Tracker (suppress duplicate foreground notifications) ─
+let _activeConversationId = null;
+
+function setActiveConversationForNotifications(conversationId) {
+  _activeConversationId = conversationId;
 }
 
 // ─── Initialize Notifications ───────────────────────────────────────────────
@@ -411,6 +419,14 @@ async function initializeNotifications(navigationRef) {
     if (data.type === "call") {
       // Show full-screen call notification even in foreground
       await displayCallNotification(data);
+    } else if (
+      data.type === "message" &&
+      _activeConversationId &&
+      data.conversationId === _activeConversationId
+    ) {
+      // User is viewing this conversation — suppress push notification
+      // (the message is already visible via WebSocket real-time delivery)
+      console.log("📨 Suppressed foreground notification (user in chat)");
     } else {
       await displayForegroundNotification(remoteMessage);
     }
@@ -539,6 +555,13 @@ if (!IS_EXPO_GO) {
       if (data.type === "call") {
         // Load notifee if not already loaded
         loadNativeModules();
+        // Cancel any basic Android notification (from notification+data push)
+        // before showing the full Notifee notification with Accept/Decline
+        if (notifee) {
+          try {
+            await notifee.cancelAllNotifications();
+          } catch {}
+        }
         await displayCallNotification(data);
       }
     });
@@ -585,5 +608,6 @@ export {
   handleNotificationNavigation,
   displayCallNotification,
   cancelCallNotification,
+  setActiveConversationForNotifications,
   CHANNELS,
 };

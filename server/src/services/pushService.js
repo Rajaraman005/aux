@@ -235,14 +235,13 @@ async function sendViaExpo(expoDevices, options) {
 
 /**
  * Send push notification for a new message.
- * Only sends if recipient is offline and has push enabled.
+ * Always sends push regardless of online status — the user's app may be
+ * backgrounded with WebSocket still alive, unable to display the message.
+ * The mobile foreground handler will suppress the notification if the user
+ * is actively viewing the chat.
  */
-async function sendMessagePush(recipientId, senderName, messagePreview) {
+async function sendMessagePush(recipientId, senderName, messagePreview, conversationId) {
   if (isRateLimited(recipientId, "message")) return;
-
-  // Check if user is online — skip push if online
-  const online = await presence.isOnline(recipientId);
-  if (online) return;
 
   // Check notification preferences
   const allowed = await isPushAllowed(recipientId, "message");
@@ -264,8 +263,9 @@ async function sendMessagePush(recipientId, senderName, messagePreview) {
     data: {
       type: "message",
       senderName,
+      conversationId: conversationId || "",
     },
-    priority: "normal",
+    priority: "high",
     channelId: "messages",
   });
 }
@@ -289,29 +289,58 @@ async function sendCallPush(
   if (devices.length === 0) return;
 
   const isVoice = callType === "voice";
-  // ★ Data-only push for calls — CRITICAL for WhatsApp-level behavior.
-  // Android ONLY fires the background JS handler for data-only messages.
-  // If a notification payload is present, Android shows its OWN basic
-  // notification and does NOT wake the background handler.
-  // The mobile background handler will create the full-screen Notifee
-  // notification with Accept/Decline buttons.
+  const callTitle = isVoice ? "Incoming Voice Call" : "Incoming Video Call";
+  const callBody = `${callerName} is calling you...`;
+
+  // ★ Send TWO pushes for maximum reliability:
+  //
+  // 1. Data-only (high priority) — triggers setBackgroundMessageHandler
+  //    when app is backgrounded. The JS handler creates a full-screen
+  //    Notifee notification with Accept/Decline buttons.
+  //    Does NOT work when app is killed on Android 12+.
+  //
+  // 2. Notification+data (high priority) — auto-displayed by Android
+  //    when app is killed/force-stopped. Tapping it opens the app.
+  //    When app is backgrounded, Android auto-displays this AND the
+  //    data-only message triggers the JS handler. The mobile handler
+  //    replaces the basic Android notification with the Notifee one.
+
+  // Push 1: Data-only for background JS handler
   enqueuePush({
     devices,
-    title: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
-    body: `${callerName} is calling you...`,
+    title: callTitle,
+    body: callBody,
     data: {
       type: "call",
       callId,
       callerId,
       callerName,
       callType,
-      // ★ Include display info in data for mobile background handler
-      notifTitle: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
-      notifBody: `${callerName} is calling you...`,
+      notifTitle: callTitle,
+      notifBody: callBody,
     },
     priority: "high",
     channelId: "calls",
-    dataOnly: true, // ★ This is the key — no notification payload
+    dataOnly: true,
+  });
+
+  // Push 2: Notification+data for killed app fallback
+  enqueuePush({
+    devices,
+    title: callTitle,
+    body: callBody,
+    data: {
+      type: "call",
+      callId,
+      callerId,
+      callerName,
+      callType,
+      notifTitle: callTitle,
+      notifBody: callBody,
+    },
+    priority: "high",
+    channelId: "calls",
+    dataOnly: false,
   });
 }
 

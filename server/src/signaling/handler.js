@@ -706,7 +706,7 @@ async function handleChatMessage(userId, userName, message, ws) {
           : media_type === "video"
             ? "Video"
             : "Photo";
-        await sendMessagePush(participantId, userName, pushText);
+        await sendMessagePush(participantId, userName, pushText, conversationId);
       }
     }
   } catch (err) {

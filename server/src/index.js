@@ -21,6 +21,11 @@ const fcmService = require("./services/fcmService");
 const app = express();
 const server = http.createServer(app);
 
+// ─── Trust Proxy (required for Render/Railway/Heroku behind reverse proxy) ──
+// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+// and cannot correctly identify clients by IP.
+app.set("trust proxy", 1);
+
 // ─── Security Headers ────────────────────────────────────────────────────────
 app.use(
   helmet({

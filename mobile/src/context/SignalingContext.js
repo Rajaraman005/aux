@@ -18,7 +18,10 @@ import React, {
 import signalingClient from "../services/socket";
 import callManager from "../services/CallManager";
 import SoundService from "../services/sounds";
-import { cancelCallNotification } from "../services/notifications";
+import {
+  cancelCallNotification,
+  setActiveConversationForNotifications,
+} from "../services/notifications";
 import { useAuth } from "./AuthContext";
 
 const SignalingContext = createContext(null);
@@ -134,6 +137,9 @@ export function SignalingProvider({ children }) {
 
   const setActiveConversation = useCallback((conversationId) => {
     activeConversationRef.current = conversationId;
+    // Sync with notification service so foreground FCM handler can suppress
+    // duplicate notifications when user is viewing this conversation
+    setActiveConversationForNotifications(conversationId);
   }, []);
 
   const value = {
