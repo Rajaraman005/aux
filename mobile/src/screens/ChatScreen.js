@@ -42,6 +42,7 @@ import signalingClient from "../services/socket";
 import callManager from "../services/CallManager";
 import { colors, typography, spacing, shadows } from "../styles/theme";
 import MessageBubble from "../components/MessageBubble";
+import TypingBubble from "../components/TypingBubble";
 import ProfilePictureViewer from "../components/ProfilePictureViewer";
 import { uploadMedia, cancelUpload } from "../services/mediaService";
 import {
@@ -597,14 +598,8 @@ export default function ChatScreen({ route, navigation }) {
             </TouchableOpacity>
           )}
 
-          {/* ─── Typing indicator ──────────────────────────────────── */}
-          {isTyping && (
-            <View style={styles.typingContainer}>
-              <Text style={styles.typingText}>
-                {otherUser.name.split(" ")[0]} is typing...
-              </Text>
-            </View>
-          )}
+          {/* ─── Typing indicator bubble ──────────────────────────── */}
+          {isTyping && <TypingBubble />}
 
           {/* ─── Input Bar (anchored to bottom, moves with keyboard) ─ */}
           <Animated.View style={[styles.inputBar, inputBarAnimStyle]}>

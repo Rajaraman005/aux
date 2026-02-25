@@ -35,6 +35,7 @@ import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 import signalingClient from "../services/socket";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
+import TypingBubble from "../components/TypingBubble";
 import MediaViewer from "../components/MediaViewer";
 import {
   pickImage,
@@ -98,6 +99,8 @@ export default function WorldScreen({ navigation }) {
   const [showAttachMenu, setShowAttachMenu] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [viewerMedia, setViewerMedia] = useState(null);
+  const [isTyping, setIsTyping] = useState(false);
+  const [typingUserName, setTypingUserName] = useState("");
 
   // Voice recording state
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
@@ -107,6 +110,8 @@ export default function WorldScreen({ navigation }) {
   const [isNearBottom, setIsNearBottom] = useState(true);
   const flatListRef = useRef(null);
   const isNearBottomRef = useRef(true);
+  const typingTimeoutRef = useRef(null);
+  const lastTypingSentRef = useRef(0);
 
   useEffect(() => {
     isNearBottomRef.current = isNearBottom;
@@ -149,9 +154,21 @@ export default function WorldScreen({ navigation }) {
       },
     );
 
+    // ★ World typing indicator
+    const unsubTyping = signalingClient.on("world-typing", (data) => {
+      if (data.userId !== user.id) {
+        setIsTyping(true);
+        setTypingUserName(data.userName || "Someone");
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = setTimeout(() => setIsTyping(false), 3000);
+      }
+    });
+
     return () => {
       unsubReceived();
       unsubConfirmed();
+      unsubTyping();
+      clearTimeout(typingTimeoutRef.current);
     };
   }, []);
 
@@ -553,6 +570,9 @@ export default function WorldScreen({ navigation }) {
             />
           )}
 
+          {/* ─── Typing indicator bubble ──────────────────────────── */}
+          {isTyping && <TypingBubble style={{ marginBottom: 4 }} />}
+
           {/* ─── Input Bar (anchored to bottom, moves with keyboard) ─ */}
           <Animated.View style={[styles.inputBar, inputBarAnimStyle]}>
             {isRecordingAudio ? (
@@ -590,7 +610,18 @@ export default function WorldScreen({ navigation }) {
                 <TextInput
                   style={styles.textInput}
                   value={inputText}
-                  onChangeText={setInputText}
+                  onChangeText={(text) => {
+                    setInputText(text);
+                    // ★ Throttled world typing indicator
+                    const now = Date.now();
+                    if (
+                      text.length > 0 &&
+                      now - lastTypingSentRef.current > 2000
+                    ) {
+                      signalingClient.send({ type: "world-typing" });
+                      lastTypingSentRef.current = now;
+                    }
+                  }}
                   placeholder="Yell into the void..."
                   placeholderTextColor={colors.textMuted}
                   multiline

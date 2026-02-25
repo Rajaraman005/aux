@@ -189,6 +189,9 @@ function initializeSignaling(wss) {
           case "world-message":
             await handleWorldMessage(userId, userName, message, ws, wss);
             break;
+          case "world-typing":
+            handleWorldTyping(userId, userName, ws, wss);
+            break;
           case "heartbeat":
             ws.send(
               JSON.stringify({ type: "heartbeat-ack", timestamp: Date.now() }),
@@ -736,6 +739,22 @@ async function handleTyping(userId, message) {
   } catch (err) {
     // Non-critical — don't fail on typing indicator
   }
+}
+
+// ─── World Chat Typing ─────────────────────────────────────────────────────────
+function handleWorldTyping(userId, userName, ws, wss) {
+  // Broadcast to all other connected clients
+  wss.clients.forEach((client) => {
+    if (client !== ws && client.readyState === 1) {
+      client.send(
+        JSON.stringify({
+          type: "world-typing",
+          userId,
+          userName,
+        }),
+      );
+    }
+  });
 }
 
 async function handleMessageRead(userId, message) {
