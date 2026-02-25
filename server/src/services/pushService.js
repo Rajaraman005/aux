@@ -10,7 +10,7 @@ const RETRY_BASE_DELAY_MS = 1000;
 // ─── Rate Limiting State ────────────────────────────────────────────────────
 const pushCooldowns = new Map(); // "userId:type" -> { windowStart, count }
 const RATE_LIMITS = {
-  message: { windowMs: 2000, maxPerWindow: 5 },
+  message: { windowMs: 3000, maxPerWindow: 10 },
   call: { windowMs: 10000, maxPerWindow: 2 },
   missed_call: { windowMs: 30000, maxPerWindow: 3 },
   friend_request: { windowMs: 5000, maxPerWindow: 3 },
@@ -154,7 +154,9 @@ async function executePush({
 
   // ── FCM Path ──────────────────────────────────────────────────────────
   if (fcmDevices.length > 0) {
-    console.log(`📤 Sending FCM push to ${fcmDevices.length} device(s)`);
+    console.log(
+      `📤 Sending FCM push to ${fcmDevices.length} device(s): ${fcmDevices.map((d) => d.device_id || d.device_name || "unknown").join(", ")}`,
+    );
     promises.push(sendViaFCM(fcmDevices, options));
   }
 

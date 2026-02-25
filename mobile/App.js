@@ -36,6 +36,7 @@ import callManager from "./src/services/CallManager";
 import {
   initializeNotifications,
   cleanupNotifications,
+  requestNotificationPermission,
 } from "./src/services/notifications";
 import { InAppNotificationProvider } from "./src/components/InAppNotification";
 import { colors, typography, shadows, spacing } from "./src/styles/theme";
@@ -398,6 +399,13 @@ function LoadingScreen() {
 function RootNavigator() {
   const { isAuthenticated, isLoading } = useAuth();
   const navigationRef = useRef(null);
+
+  // ★ Request notification permission immediately on app start.
+  // This ensures fresh installs see the Android 13+ permission dialog
+  // on the very first screen (before login), just like WhatsApp.
+  React.useEffect(() => {
+    requestNotificationPermission();
+  }, []);
 
   // Initialize push notification listeners
   React.useEffect(() => {

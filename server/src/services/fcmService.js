@@ -207,6 +207,17 @@ function buildMessage(
     },
   };
 
+  // ★ CRITICAL FIX: For data-only pushes, ALWAYS use HIGH priority.
+  // Some OEMs (Xiaomi, Samsung, Oppo, Vivo, Huawei) aggressively throttle
+  // NORMAL priority data-only messages, causing silently dropped notifications.
+  // HIGH priority ensures the message wakes the device and triggers
+  // setBackgroundMessageHandler in the JS layer.
+  // This matches WhatsApp/Telegram behavior for message delivery.
+  if (dataOnly) {
+    message.android.priority = "HIGH";
+    message.android.ttl = "0s";
+  }
+
   // Add notification payload (unless data-only / silent push)
   // ★ CRITICAL: For data-only pushes, we MUST NOT include a notification key.
   // When the notification key is present AND the app is killed, Android

@@ -58,6 +58,61 @@ const CHANNELS = {
 // ─── Notification Icon (use ic_launcher which always exists) ─────────────────
 const NOTIF_SMALL_ICON = "ic_launcher";
 
+// ─── Request Notification Permission (Android 13+ / API 33+) ────────────────
+// ★ CRITICAL: Android 13+ requires POST_NOTIFICATIONS runtime permission.
+// Without this, ALL notifications are silently suppressed. This MUST be
+// called early (ideally on first app launch) before any push registration.
+// Notifee.requestPermission() handles the system dialog on Android 13+ and
+// is a no-op on older versions (permission is auto-granted at install).
+async function requestNotificationPermission() {
+  // Load native modules if not loaded
+  loadNativeModules();
+
+  if (Platform.OS === "android" && notifee) {
+    try {
+      const settings = await notifee.requestPermission();
+      // authorizationStatus: 0=DENIED, 1=AUTHORIZED, 2=PROVISIONAL
+      const granted = settings.authorizationStatus >= 1;
+      console.log(
+        `📱 Notification permission: ${granted ? "✅ granted" : "❌ denied"} (status: ${settings.authorizationStatus})`,
+      );
+      return granted;
+    } catch (err) {
+      console.error("Notifee permission request error:", err);
+    }
+  }
+
+  if (Platform.OS === "android" && messaging) {
+    try {
+      const authStatus = await messaging().requestPermission();
+      const granted =
+        authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+        authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+      console.log(`📱 FCM permission: ${granted ? "✅ granted" : "❌ denied"}`);
+      return granted;
+    } catch (err) {
+      console.error("FCM permission request error:", err);
+    }
+  }
+
+  // Expo Go fallback
+  if (IS_EXPO_GO) {
+    try {
+      const { status: existingStatus } =
+        await ExpoNotifications.getPermissionsAsync();
+      if (existingStatus === "granted") return true;
+
+      const { status } = await ExpoNotifications.requestPermissionsAsync();
+      return status === "granted";
+    } catch (err) {
+      console.error("Expo permission request error:", err);
+    }
+  }
+
+  // iOS or unavailable — return true (iOS handles permission via FCM)
+  return Platform.OS === "ios";
+}
+
 // ─── Setup Android Notification Channels ────────────────────────────────────
 async function setupNotificationChannels() {
   if (Platform.OS !== "android" || !notifee) return;
@@ -283,7 +338,8 @@ async function displayMessageNotification(data) {
       importance: AndroidImportance.HIGH,
       smallIcon: NOTIF_SMALL_ICON,
       color: "#6C63FF",
-      pressAction: { id: "default" },
+      // ★ FIX: launchActivity ensures tapping notification opens the app
+      pressAction: { id: "default", launchActivity: "default" },
       autoCancel: true,
       showTimestamp: true,
       timestamp,
@@ -366,7 +422,8 @@ async function displayForegroundNotification(remoteMessage) {
         channelId,
         smallIcon: NOTIF_SMALL_ICON,
         color: "#6C63FF",
-        pressAction: { id: "default" },
+        // ★ FIX: launchActivity ensures tapping notification opens the app
+        pressAction: { id: "default", launchActivity: "default" },
         importance:
           data.type === "call"
             ? AndroidImportance.HIGH
@@ -563,25 +620,58 @@ async function initializeNotifications(navigationRef) {
     });
   }
 
-  // Background notification tap
+  // Background notification tap (FCM notification+data payloads)
   messaging().onNotificationOpenedApp((remoteMessage) => {
-    console.log("📨 Notification opened from background");
+    console.log("📨 Notification opened from background (FCM)");
     setTimeout(() => {
       handleNotificationNavigation(remoteMessage.data, navigationRef);
     }, 500);
   });
 
-  // Cold start check
+  // ★ Notifee cold-start check — CRITICAL for data-only pushes.
+  // When the app is killed and a data-only push triggers a Notifee
+  // notification, FCM's getInitialNotification() returns null because
+  // there's no FCM notification payload. Notifee's version works
+  // because Notifee created the notification from the background handler.
+  if (notifee) {
+    try {
+      const initialNotifee = await notifee.getInitialNotification();
+      if (initialNotifee) {
+        const notifData = initialNotifee.notification?.data;
+        const actionId = initialNotifee.pressAction?.id;
+        console.log(
+          "📨 Cold start from Notifee notification:",
+          notifData?.type,
+          "action:",
+          actionId,
+        );
+        if (notifData) {
+          // If user tapped "Accept" on a call notification
+          if (actionId === "accept_call") {
+            notifData.acceptFromNotification = true;
+            notifData.type = "call";
+          }
+          setTimeout(() => {
+            handleNotificationNavigation(notifData, navigationRef);
+          }, 1000);
+        }
+      }
+    } catch (err) {
+      console.error("Notifee cold start check error:", err);
+    }
+  }
+
+  // FCM cold start check (notification+data payloads, e.g. call fallback)
   try {
     const initial = await messaging().getInitialNotification();
     if (initial) {
-      console.log("📨 Cold start from notification");
+      console.log("📨 Cold start from FCM notification");
       setTimeout(() => {
         handleNotificationNavigation(initial.data, navigationRef);
       }, 1000);
     }
   } catch (err) {
-    console.error("Cold start check error:", err);
+    console.error("FCM cold start check error:", err);
   }
 }
 
@@ -613,6 +703,19 @@ async function registerPushNotifications() {
   loadNativeModules();
 
   if (isNativeAvailable) {
+    // ★ CRITICAL: Request permission FIRST (Android 13+ requirement)
+    // Without this, getFCMToken() succeeds but notifications are blocked
+    // at the OS level, resulting in silent delivery failures.
+    const permissionGranted = await requestNotificationPermission();
+    if (!permissionGranted) {
+      console.warn(
+        "📱 Notification permission denied — push will not be delivered.",
+        "User must enable notifications in system Settings > Apps > Aux.",
+      );
+      // Still attempt to register token — permission can be granted later
+      // and FCM will start delivering once enabled.
+    }
+
     // ★ NATIVE MODE: Use FCM token
     const token = await getFCMToken();
     if (token) {
@@ -625,6 +728,10 @@ async function registerPushNotifications() {
   if (IS_EXPO_GO) {
     // ★ EXPO GO MODE: Use Expo Push Token
     console.log("📱 Registering Expo Push Token (Expo Go mode)...");
+    const permissionGranted = await requestNotificationPermission();
+    if (!permissionGranted) {
+      console.warn("📱 Expo notification permission denied");
+    }
     const token = await getExpoPushToken();
     if (token) {
       lastPushToken = token;
@@ -692,7 +799,8 @@ if (!IS_EXPO_GO) {
               channelId: CHANNELS.GENERAL,
               smallIcon: NOTIF_SMALL_ICON,
               color: "#6C63FF",
-              pressAction: { id: "default" },
+              // ★ FIX: launchActivity ensures tapping opens the app
+              pressAction: { id: "default", launchActivity: "default" },
               importance: AndroidImportance?.HIGH || 4,
             },
           });
@@ -744,5 +852,6 @@ export {
   displayMessageNotification,
   cancelCallNotification,
   setActiveConversationForNotifications,
+  requestNotificationPermission,
   CHANNELS,
 };
