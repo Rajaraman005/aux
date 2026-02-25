@@ -201,11 +201,17 @@ function buildMessage(
     data: stringData,
     android: {
       priority: priority === "high" ? "HIGH" : "NORMAL",
-      ttl: priority === "high" ? "0s" : "86400s", // Calls: immediate, Messages: 24h
+      ttl: priority === "high" ? "0s" : "14400s", // Calls: immediate, Messages: 4h
+      // ★ Allow delivery during direct boot (device setup/restart)
+      direct_boot_ok: priority === "high",
     },
   };
 
   // Add notification payload (unless data-only / silent push)
+  // ★ CRITICAL: For data-only pushes, we MUST NOT include a notification key.
+  // When the notification key is present AND the app is killed, Android
+  // auto-displays a basic notification and NEVER triggers
+  // setBackgroundMessageHandler in the JS layer.
   if (!dataOnly && title) {
     message.android.notification = {
       title,

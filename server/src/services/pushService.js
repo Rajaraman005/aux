@@ -240,7 +240,12 @@ async function sendViaExpo(expoDevices, options) {
  * The mobile foreground handler will suppress the notification if the user
  * is actively viewing the chat.
  */
-async function sendMessagePush(recipientId, senderName, messagePreview, conversationId) {
+async function sendMessagePush(
+  recipientId,
+  senderName,
+  messagePreview,
+  conversationId,
+) {
   if (isRateLimited(recipientId, "message")) return;
 
   // Check notification preferences
@@ -253,20 +258,30 @@ async function sendMessagePush(recipientId, senderName, messagePreview, conversa
   const devices = await db.getActiveDevices(recipientId);
   if (devices.length === 0) return;
 
+  const truncatedBody =
+    messagePreview.length > 100
+      ? messagePreview.slice(0, 100) + "…"
+      : messagePreview;
+
+  // ★ CRITICAL FIX: Send data-only push so setBackgroundMessageHandler
+  // ALWAYS runs — even when the app is killed/force-stopped.
+  // With notification+data payloads, Android auto-displays a basic
+  // notification and NEVER triggers the JS background handler.
+  // The mobile handler constructs a rich Notifee notification instead.
   enqueuePush({
     devices,
     title: senderName,
-    body:
-      messagePreview.length > 100
-        ? messagePreview.slice(0, 100) + "…"
-        : messagePreview,
+    body: truncatedBody,
     data: {
       type: "message",
       senderName,
       conversationId: conversationId || "",
+      title: senderName,
+      body: truncatedBody,
     },
     priority: "high",
     channelId: "messages",
+    dataOnly: true,
   });
 }
 

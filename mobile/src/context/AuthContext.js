@@ -41,7 +41,9 @@ export function AuthProvider({ children }) {
             setUser(fresh);
             await apiClient.saveUser(fresh);
             // Register push token on app startup if authenticated
-            registerPushNotifications();
+            // ★ FIX: Retry registration with backoff — a single failure
+            // on cold start means no notifications until re-login
+            registerPushNotificationsWithRetry();
           } catch (err) {
             // Token invalid — clear state
             if (err.code === "SESSION_EXPIRED") {
@@ -127,8 +129,8 @@ export function AuthProvider({ children }) {
     setUser(result.user);
     setIsAuthenticated(true);
 
-    // Register push token after login
-    registerPushNotifications();
+    // Register push token after login with retry
+    registerPushNotificationsWithRetry();
 
     return result;
   }, []);
@@ -191,3 +193,27 @@ export function useAuth() {
 }
 
 export default AuthContext;
+
+// ★ Push registration with retry — ensures token is always registered
+async function registerPushNotificationsWithRetry(maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const token = await registerPushNotifications();
+      if (token) {
+        console.log(`📱 Push token registered (attempt ${attempt})`);
+        return token;
+      }
+    } catch (err) {
+      console.warn(
+        `📱 Push registration attempt ${attempt}/${maxRetries} failed:`,
+        err.message || err,
+      );
+    }
+    if (attempt < maxRetries) {
+      // Wait 2^attempt seconds before retrying
+      await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
+    }
+  }
+  console.error("📱 Push registration failed after all retries");
+  return null;
+}

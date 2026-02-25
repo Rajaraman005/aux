@@ -39,7 +39,9 @@
         "android.permission.VIBRATE",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_PHONE_CALL"
+        "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.RECEIVE_BOOT_COMPLETED"
       ],
       "blockedPermissions": [
         "android.permission.READ_PHONE_STATE",
@@ -63,6 +65,8 @@
       ],
       "@react-native-firebase/app",
       "@react-native-firebase/messaging",
+      "@notifee/react-native",
+      "./plugins/withCallNotifications",
       [
         "expo-notifications",
         {

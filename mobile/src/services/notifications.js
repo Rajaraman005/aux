@@ -236,6 +236,7 @@ async function displayCallNotification(data) {
         // ★ KEY: asForegroundService ensures the notification displays
         // even when the app is killed/force-stopped (like WhatsApp calls)
         asForegroundService: true,
+        foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
         vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
         // ★ Sound + loop for continuous ringtone like a real phone call
         sound: "default",
@@ -502,6 +503,8 @@ async function initializeNotifications(navigationRef) {
   foregroundUnsubscribe = messaging().onMessage(async (remoteMessage) => {
     console.log("📨 Foreground FCM message:", remoteMessage.data?.type);
     const data = remoteMessage.data || {};
+    const notification = remoteMessage.notification || {};
+
     if (data.type === "call") {
       // Show full-screen call notification even in foreground
       await displayCallNotification(data);
@@ -514,7 +517,19 @@ async function initializeNotifications(navigationRef) {
       // (the message is already visible via WebSocket real-time delivery)
       console.log("📨 Suppressed foreground notification (user in chat)");
     } else {
-      await displayForegroundNotification(remoteMessage);
+      // ★ FIX: For data-only pushes, read from data fields
+      // (notification field is empty on data-only messages)
+      if (data.type === "message") {
+        await displayMessageNotification({
+          senderName:
+            data.senderName || data.title || notification.title || "Someone",
+          body: data.body || notification.body || "New message",
+          conversationId: data.conversationId || "",
+          ...data,
+        });
+      } else {
+        await displayForegroundNotification(remoteMessage);
+      }
     }
   });
 
@@ -652,12 +667,16 @@ if (!IS_EXPO_GO) {
         }
         await displayCallNotification(data);
       } else if (data.type === "message") {
-        // ★ KEY FIX: Show WhatsApp-style notification for messages
-        // when app is in background or killed
+        // ★ CRITICAL FIX: For data-only pushes, title/body come from
+        // the DATA payload, NOT from remoteMessage.notification (which
+        // is empty for data-only messages). This is why notifications
+        // were not showing — senderName/body were being read from
+        // notification fields that don't exist on data-only pushes.
+        const senderName = data.senderName || data.title || "Someone";
+        const messageBody = data.body || "New message";
         await displayMessageNotification({
-          senderName:
-            data.senderName || remoteMessage.notification?.title || "Someone",
-          body: remoteMessage.notification?.body || data.body || "New message",
+          senderName,
+          body: messageBody,
           conversationId: data.conversationId || "",
           ...data,
         });
