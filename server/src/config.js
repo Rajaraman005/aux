@@ -63,6 +63,7 @@ const config = {
     projectId: process.env.FCM_PROJECT_ID,
     serviceAccountPath:
       process.env.FCM_SERVICE_ACCOUNT_PATH || "./fcm-service-account.json",
+    serviceAccountJson: process.env.FCM_SERVICE_ACCOUNT_JSON,
   },
 };
 

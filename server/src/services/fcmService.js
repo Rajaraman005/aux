@@ -64,23 +64,38 @@ const fcmMetrics = {
 function loadServiceAccount() {
   if (serviceAccount) return serviceAccount;
 
+  // 1. Try JSON from Environment Variable (PaaS/Render preferred)
+  if (config.fcm?.serviceAccountJson) {
+    try {
+      serviceAccount = JSON.parse(config.fcm.serviceAccountJson);
+      console.log(
+        `✅ FCM: Service account loaded from FCM_SERVICE_ACCOUNT_JSON env var (project: ${serviceAccount.project_id})`,
+      );
+      return serviceAccount;
+    } catch (err) {
+      console.error(
+        `❌ FCM: Failed to parse FCM_SERVICE_ACCOUNT_JSON env var: ${err.message}`,
+      );
+    }
+  }
+
+  // 2. Try File Path (Local DEV/Docker preferred)
   const saPath = config.fcm?.serviceAccountPath;
   if (!saPath) {
     console.warn(
-      "⚠️  FCM: No service account path configured (FCM_SERVICE_ACCOUNT_PATH)",
+      "⚠️  FCM: No service account configured (FCM_SERVICE_ACCOUNT_JSON or FCM_SERVICE_ACCOUNT_PATH)",
     );
     return null;
   }
 
   try {
-    // ★ Resolve path relative to CWD for platform-safe loading
     const path = require("path");
     const resolved = path.resolve(saPath);
     console.log(`📋 FCM: Loading service account from: ${resolved}`);
     const raw = fs.readFileSync(resolved, "utf8");
     serviceAccount = JSON.parse(raw);
     console.log(
-      `✅ FCM: Service account loaded (project: ${serviceAccount.project_id})`,
+      `✅ FCM: Service account loaded from file (project: ${serviceAccount.project_id})`,
     );
     return serviceAccount;
   } catch (err) {
@@ -88,7 +103,7 @@ function loadServiceAccount() {
       `❌ FCM: Failed to load service account from ${saPath}: ${err.message}`,
     );
     console.error(
-      `   ★ Check FCM_SERVICE_ACCOUNT_PATH in .env — must be relative to server/ directory`,
+      `   ★ Set FCM_SERVICE_ACCOUNT_JSON in Render dashboard, OR check FCM_SERVICE_ACCOUNT_PATH`,
     );
     return null;
   }
