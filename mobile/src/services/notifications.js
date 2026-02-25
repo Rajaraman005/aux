@@ -439,44 +439,53 @@ async function displayForegroundNotification(remoteMessage) {
 function handleNotificationNavigation(data, navigationRef) {
   if (!navigationRef?.current || !data) return;
 
-  switch (data.type) {
-    case "message":
-      if (data.conversationId) {
-        navigationRef.current.navigate("Chat", {
-          conversationId: data.conversationId,
-          otherUserName: data.senderName,
+  // ★ Check if navigation is ready (prevents crash on cold start)
+  if (!navigationRef.current.isReady || !navigationRef.current.isReady()) {
+    // Retry after a delay if not ready
+    setTimeout(() => handleNotificationNavigation(data, navigationRef), 1000);
+    return;
+  }
+
+  try {
+    switch (data.type) {
+      case "message":
+        if (data.conversationId) {
+          navigationRef.current.navigate("Chat", {
+            conversationId: data.conversationId,
+            otherUserName: data.senderName,
+          });
+        }
+        break;
+
+      case "call":
+        navigationRef.current.navigate("Call", {
+          callId: data.callId || null,
+          callerId: data.callerId || null,
+          callerName: data.callerName || "Unknown",
+          callerAvatar: data.callerAvatar || null,
+          callType: data.callType || "video",
+          acceptFromNotification: data.acceptFromNotification || false,
+          fromPushNotification: true,
         });
-      }
-      break;
+        break;
+      case "missed_call":
+        navigationRef.current.navigate("MainTabs", { screen: "Home" });
+        break;
 
-    case "call":
-      // Navigate to Call screen — either auto-accept (from Notifee action)
-      // or show incoming call UI (from FCM notification tap on killed app)
-      navigationRef.current.navigate("Call", {
-        callId: data.callId || null,
-        callerId: data.callerId || null,
-        callerName: data.callerName || "Unknown",
-        callerAvatar: data.callerAvatar || null,
-        callType: data.callType || "video",
-        acceptFromNotification: data.acceptFromNotification || false,
-        fromPushNotification: true,
-      });
-      break;
-    case "missed_call":
-      navigationRef.current.navigate("MainTabs", { screen: "Home" });
-      break;
+      case "friend_request":
+        navigationRef.current.navigate("MainTabs", { screen: "Requests" });
+        break;
 
-    case "friend_request":
-      navigationRef.current.navigate("MainTabs", { screen: "Requests" });
-      break;
+      case "world_mention":
+        navigationRef.current.navigate("WorldChat");
+        break;
 
-    case "world_mention":
-      navigationRef.current.navigate("WorldChat");
-      break;
-
-    default:
-      navigationRef.current.navigate("Notifications");
-      break;
+      default:
+        navigationRef.current.navigate("Notifications");
+        break;
+    }
+  } catch (err) {
+    console.error("Notification navigation error:", err);
   }
 }
 

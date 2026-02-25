@@ -64,7 +64,7 @@ export function SignalingProvider({ children }) {
         return;
       }
       setIncomingCall({ ...data, callType: data.callType || "video" });
-      SoundService.playRingtone();
+      SoundService.playRingtone().catch(() => {});
     });
 
     // ★ Auto-clear zombie incoming calls
@@ -99,7 +99,7 @@ export function SignalingProvider({ children }) {
       ) {
         return;
       }
-      SoundService.playMessage();
+      SoundService.playMessage().catch(() => {});
     });
 
     // ★ Listen for real-time profile updates (avatar changes from other users)

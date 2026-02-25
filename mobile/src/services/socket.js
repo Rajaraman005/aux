@@ -11,7 +11,9 @@
  *   - Messages sent while disconnected are queued
  *   - Automatically flushed on reconnection
  */
+import { AppState } from "react-native";
 import { WS_BASE } from "../config/api";
+import crashLogger, { CATEGORIES } from "./CrashLogger";
 
 class SignalingClient {
   constructor() {
@@ -31,6 +33,57 @@ class SignalingClient {
     this._maxQueueSize = 50;
     this._lastPongTime = 0;
     this._pongCheckTimer = null;
+
+    // ★ Lifecycle awareness
+    this._appStateSubscription = null;
+    this._isBackgrounded = false;
+    this._setupAppStateListener();
+  }
+
+  // ★ AppState listener — pause heartbeat when backgrounded, resume on foreground
+  _setupAppStateListener() {
+    this._appStateSubscription = AppState.addEventListener(
+      "change",
+      (nextState) => {
+        if (nextState === "background" || nextState === "inactive") {
+          if (!this._isBackgrounded) {
+            this._isBackgrounded = true;
+            crashLogger.log(
+              CATEGORIES.SOCKET_DISCONNECTED,
+              "App backgrounded — pausing heartbeat",
+            );
+            this._pauseHeartbeat();
+          }
+        } else if (nextState === "active" && this._isBackgrounded) {
+          this._isBackgrounded = false;
+          crashLogger.log(
+            CATEGORIES.SOCKET_CONNECTED,
+            "App foregrounded — checking connection",
+          );
+          this._onForegroundResume();
+        }
+      },
+    );
+  }
+
+  // ★ On foreground: check if socket is still alive, reconnect if needed
+  _onForegroundResume() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Socket still open — resume heartbeat and send a probe
+      this.startHeartbeat();
+      this.send({ type: "heartbeat" });
+    } else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+      // Still connecting — let it finish
+    } else if (this.token) {
+      // Socket died while backgrounded — force immediate reconnect
+      crashLogger.log(
+        CATEGORIES.SOCKET_DISCONNECTED,
+        "Socket died while backgrounded — reconnecting",
+      );
+      this.isConnected = false;
+      this.reconnectAttempts = 0; // Reset attempts for fresh start
+      this.connect(this.token);
+    }
   }
 
   /**
@@ -48,7 +101,7 @@ class SignalingClient {
       this.ws = new WebSocket(`${WS_BASE}?token=${token}`);
 
       this.ws.onopen = () => {
-        console.log("🟢 Signaling connected");
+        crashLogger.log(CATEGORIES.SOCKET_CONNECTED, "Signaling connected");
         this.isConnected = true;
         this.reconnectAttempts = 0;
         this.startHeartbeat();
@@ -85,13 +138,21 @@ class SignalingClient {
       };
 
       this.ws.onclose = (event) => {
-        console.log(`🔴 Signaling disconnected (code: ${event.code})`);
+        crashLogger.log(
+          CATEGORIES.SOCKET_DISCONNECTED,
+          `Signaling disconnected (code: ${event.code})`,
+        );
         this.isConnected = false;
         this.stopHeartbeat();
         this.onConnectionChange?.(false);
 
-        // Don't reconnect if intentionally closed or auth failed
-        if (event.code !== 1000 && event.code !== 4001 && event.code !== 4002) {
+        // Don't reconnect if intentionally closed, auth failed, or backgrounded
+        if (
+          event.code !== 1000 &&
+          event.code !== 4001 &&
+          event.code !== 4002 &&
+          !this._isBackgrounded
+        ) {
           this.attemptReconnect();
         }
 
@@ -99,7 +160,7 @@ class SignalingClient {
       };
 
       this.ws.onerror = (error) => {
-        console.error("Signaling error:", error.message);
+        crashLogger.log(CATEGORIES.SOCKET_ERROR, "Signaling error", error);
         this.emit("error", error);
       };
     } catch (err) {
@@ -208,7 +269,8 @@ class SignalingClient {
     }, 20000);
   }
 
-  stopHeartbeat() {
+  // ★ Pause heartbeat (background mode) — stops timers but doesn't close socket
+  _pauseHeartbeat() {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -217,6 +279,10 @@ class SignalingClient {
       clearInterval(this._pongCheckTimer);
       this._pongCheckTimer = null;
     }
+  }
+
+  stopHeartbeat() {
+    this._pauseHeartbeat();
   }
 
   // ─── Event System ─────────────────────────────────────────────────────────

@@ -40,6 +40,7 @@ import { AppState } from "react-native";
 import signalingClient from "./socket";
 import { endpoints } from "../config/api";
 import apiClient from "./api";
+import crashLogger, { CATEGORIES } from "./CrashLogger";
 
 // ─── Call State Machine ──────────────────────────────────────────────────────
 export const CALL_STATES = {
@@ -128,6 +129,9 @@ class WebRTCEngine {
     this._iceRestartAttempts = 0;
     this._maxIceRestarts = 3;
     this._iceRestartTimer = null;
+
+    // ★ Cleanup guard — prevents recursive re-entry
+    this._isCleaningUp = false;
   }
 
   // ─── State Machine ─────────────────────────────────────────────────────────
@@ -783,71 +787,98 @@ class WebRTCEngine {
 
   // ─── Cleanup (Idempotent) ──────────────────────────────────────────────────
   cleanup() {
-    // ★ Idempotent guard — prevent re-entrant cleanup
-    if (
-      this._callState === CALL_STATES.IDLE ||
-      this._callState === CALL_STATES.ENDING
-    ) {
+    // ★ Prevent recursive re-entry (fixes race condition crash)
+    if (this._isCleaningUp) {
       return;
     }
-    this._setState(CALL_STATES.ENDING);
 
-    // ★ Stop InCallManager
-    if (InCallManager) {
-      try {
-        InCallManager.stop();
-        InCallManager.setKeepScreenOn(false);
-      } catch (e) {}
+    // ★ Allow cleanup from any state except IDLE
+    if (this._callState === CALL_STATES.IDLE) {
+      return;
     }
 
-    // Remove AppState listener
-    if (this._appStateSubscription) {
-      this._appStateSubscription.remove();
-      this._appStateSubscription = null;
-    }
+    this._isCleaningUp = true;
 
-    // Clear timers
-    if (this.statsInterval) {
-      clearInterval(this.statsInterval);
-      this.statsInterval = null;
-    }
-    if (this._iceRestartTimer) {
-      clearTimeout(this._iceRestartTimer);
-      this._iceRestartTimer = null;
-    }
+    try {
+      this._setState(CALL_STATES.ENDING);
 
-    // Stop all tracks
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
-      this.localStream = null;
-    }
-    if (this.remoteStream) {
-      this.remoteStream = null;
-    }
+      // ★ Stop InCallManager
+      if (InCallManager) {
+        try {
+          InCallManager.stop();
+          InCallManager.setKeepScreenOn(false);
+        } catch (e) {}
+      }
 
-    // Close peer connection
-    if (this.pc) {
-      this.pc.onconnectionstatechange = null;
-      this.pc.oniceconnectionstatechange = null;
-      this.pc.ontrack = null;
-      this.pc.onicecandidate = null;
-      this.pc.close();
-      this.pc = null;
+      // Remove AppState listener
+      if (this._appStateSubscription) {
+        this._appStateSubscription.remove();
+        this._appStateSubscription = null;
+      }
+
+      // Clear timers
+      if (this.statsInterval) {
+        clearInterval(this.statsInterval);
+        this.statsInterval = null;
+      }
+      if (this._iceRestartTimer) {
+        clearTimeout(this._iceRestartTimer);
+        this._iceRestartTimer = null;
+      }
+
+      // Stop all tracks
+      if (this.localStream) {
+        try {
+          this.localStream.getTracks().forEach((track) => track.stop());
+        } catch (e) {
+          crashLogger.log(
+            CATEGORIES.WEBRTC_ERROR,
+            "Error stopping local tracks",
+            e,
+          );
+        }
+        this.localStream = null;
+      }
+      if (this.remoteStream) {
+        this.remoteStream = null;
+      }
+
+      // Close peer connection
+      if (this.pc) {
+        try {
+          this.pc.onconnectionstatechange = null;
+          this.pc.oniceconnectionstatechange = null;
+          this.pc.ontrack = null;
+          this.pc.onicecandidate = null;
+          this.pc.close();
+        } catch (e) {
+          crashLogger.log(
+            CATEGORIES.WEBRTC_ERROR,
+            "Error closing peer connection",
+            e,
+          );
+        }
+        this.pc = null;
+      }
+
+      this.callId = null;
+      this.iceCandidateQueue = [];
+      this.isAudioOnly = false;
+      this._opusPayloadType = null;
+      this._statsActive = true;
+      this._isBackgrounded = false;
+      this._iceRestartAttempts = 0;
+      this._initialized = false;
+      this._remoteDescriptionSet = false;
+      this._pendingOffer = null;
+      this._pendingAnswer = null;
+
+      this._setState(CALL_STATES.IDLE);
+    } catch (err) {
+      crashLogger.log(CATEGORIES.WEBRTC_ERROR, "Cleanup error", err);
+    } finally {
+      this._isCleaningUp = false;
     }
-
-    this.callId = null;
-    this.iceCandidateQueue = [];
-    this.isAudioOnly = false;
-    this._opusPayloadType = null;
-    this._statsActive = true;
-    this._isBackgrounded = false;
-    this._iceRestartAttempts = 0;
-    this._initialized = false;
-    this._remoteDescriptionSet = false;
-    this._pendingOffer = null;
-    this._pendingAnswer = null;
-
-    this._setState(CALL_STATES.IDLE);
   }
 }
 

@@ -19,7 +19,9 @@ import {
   Modal,
   Text,
   Image,
+  AppState,
 } from "react-native";
+import crashLogger, { CATEGORIES } from "./src/services/CrashLogger";
 import {
   SafeAreaProvider,
   useSafeAreaInsets,
@@ -456,16 +458,86 @@ function RootNavigator() {
   );
 }
 
+// ─── Error Boundary (catches React component tree crashes) ────────────────
+class ErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    crashLogger.log(
+      CATEGORIES.ERROR_BOUNDARY,
+      `React tree crash: ${error.message}`,
+      error,
+    );
+    crashLogger.logMemoryUsage();
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={styles.errorBoundary}>
+          <Text style={styles.errorTitle}>Something went wrong</Text>
+          <Text style={styles.errorMessage}>
+            {this.state.error?.message || "An unexpected error occurred"}
+          </Text>
+          <TouchableOpacity
+            style={styles.errorButton}
+            onPress={() => this.setState({ hasError: false, error: null })}
+          >
+            <Text style={styles.errorButtonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ─── App Entry Point ─────────────────────────────────────────────────────────
 export default function App() {
+  // ★ Log app lifecycle for crash diagnostics
+  useEffect(() => {
+    crashLogger.log(CATEGORIES.APP_START, "App component mounted");
+    crashLogger.logMemoryUsage();
+
+    const appStateSub = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        crashLogger.log(CATEGORIES.APP_FOREGROUND, "App foregrounded");
+        crashLogger.logMemoryUsage();
+      } else if (state === "background") {
+        crashLogger.log(CATEGORIES.APP_BACKGROUND, "App backgrounded");
+        crashLogger.logMemoryUsage();
+        // Force flush logs before going to background
+        crashLogger.flushNow();
+      }
+    });
+
+    // ★ Periodic memory monitoring (every 30s during active use)
+    const memTimer = setInterval(() => {
+      if (AppState.currentState === "active") {
+        crashLogger.logMemoryUsage();
+      }
+    }, 30000);
+
+    return () => {
+      appStateSub.remove();
+      clearInterval(memTimer);
+    };
+  }, []);
+
   return (
-    <SafeAreaProvider>
-      <KeyboardProvider>
-        <AuthProvider>
-          <RootNavigator />
-        </AuthProvider>
-      </KeyboardProvider>
-    </SafeAreaProvider>
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <KeyboardProvider>
+          <AuthProvider>
+            <RootNavigator />
+          </AuthProvider>
+        </KeyboardProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -475,6 +547,37 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     backgroundColor: colors.bg,
+  },
+  errorBoundary: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+    backgroundColor: "#FAFAFA",
+    padding: 24,
+  },
+  errorTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#1a1a1a",
+    marginBottom: 12,
+  },
+  errorMessage: {
+    fontSize: 14,
+    color: "#666",
+    textAlign: "center",
+    marginBottom: 24,
+    lineHeight: 20,
+  },
+  errorButton: {
+    backgroundColor: "#1a1a1a",
+    paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  errorButtonText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
   },
 
   // Incoming Call Overlay

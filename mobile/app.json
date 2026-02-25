@@ -40,6 +40,7 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_PHONE_CALL",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.RECEIVE_BOOT_COMPLETED"
       ],

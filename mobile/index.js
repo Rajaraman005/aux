@@ -23,6 +23,59 @@ import { AppRegistry, Platform } from "react-native";
 import { expo as appConfig } from "./app.json";
 import App from "./App";
 
+// ─── GLOBAL ERROR HANDLERS (MUST be first) ──────────────────────────────────
+// ★ These prevent "AUX keeps stopping" by catching unhandled errors
+// and logging them instead of letting them crash the app process.
+import crashLogger, { CATEGORIES } from "./src/services/CrashLogger";
+
+// 1. Catch all unhandled JS exceptions (synchronous throws, etc.)
+const defaultHandler = ErrorUtils.getGlobalHandler();
+ErrorUtils.setGlobalHandler((error, isFatal) => {
+  crashLogger.log(
+    CATEGORIES.CRASH_DETECTED,
+    `Unhandled ${isFatal ? "FATAL" : "non-fatal"} JS error`,
+    error,
+  );
+
+  // ★ For non-fatal errors, swallow them to prevent app crash.
+  // For fatal errors, call the default handler which shows the red screen in dev
+  // and would normally crash in production — but at least we've logged it.
+  if (isFatal) {
+    // In production, we log and let the default handler decide.
+    // The ErrorBoundary in App.js will catch React tree errors.
+    if (__DEV__) {
+      defaultHandler?.(error, isFatal);
+    }
+    // In production, do NOT re-throw fatal errors — let ErrorBoundary handle UI
+  } else {
+    // Non-fatal: log only, do not crash
+    if (__DEV__) {
+      defaultHandler?.(error, isFatal);
+    }
+  }
+});
+
+// 2. Catch all unhandled Promise rejections
+if (typeof global !== "undefined") {
+  const tracking = require("promise/setimmediate/rejection-tracking");
+  tracking.enable({
+    allRejections: true,
+    onUnhandled: (_id, error) => {
+      crashLogger.log(
+        CATEGORIES.PROMISE_REJECTION,
+        "Unhandled Promise rejection",
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      // ★ Do NOT re-throw — swallow to prevent crash
+    },
+    onHandled: () => {
+      // Promise was eventually handled — no action needed
+    },
+  });
+}
+
+crashLogger.log(CATEGORIES.APP_START, "index.js loaded — app process starting");
+
 // ─── Background Message Handler (MUST be registered before AppRegistry) ─────
 // This runs in a headless JS context when the app is killed/backgrounded.
 // It MUST be at the entry point level, not inside a React component.

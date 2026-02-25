@@ -22,6 +22,7 @@ import signalingClient from "./socket";
 import webrtcEngine from "./webrtc";
 import networkMonitor from "./networkMonitor";
 import audioEngine from "./audioEngine";
+import crashLogger, { CATEGORIES } from "./CrashLogger";
 
 // ─── Deterministic State Machine ────────────────────────────────────────────
 const STATES = {
@@ -161,16 +162,25 @@ class CallManager {
     //   This handles the race where the 1500ms ENDED→IDLE auto-transition
     //   hasn't completed yet when the user tries to make a new call.
     if (this.isTerminal) {
-      console.log(
-        `📞 CallManager: Auto-resetting from terminal state: ${this._state}`,
+      crashLogger.log(
+        CATEGORIES.CALL_STARTED,
+        `Auto-resetting from terminal state: ${this._state}`,
       );
       this.forceReset();
     }
 
     if (this.isActive) {
-      console.warn("📞 CallManager: Cannot start call — already in a call");
+      crashLogger.log(
+        CATEGORIES.CALL_ERROR,
+        "Cannot start call — already in a call",
+      );
       return false;
     }
+
+    crashLogger.log(
+      CATEGORIES.CALL_STARTED,
+      `Starting ${callType} call to ${targetName}`,
+    );
 
     this._session = {
       callId: null, // Assigned by server via call-ringing
@@ -240,9 +250,6 @@ class CallManager {
   // ─── End Call (Idempotent) ──────────────────────────────────────────────
   endCall(reason = "user_hangup") {
     if (!this._session || this._session.hasEnded) {
-      console.log(
-        "📞 CallManager: endCall ignored — already ended or no session",
-      );
       return;
     }
 
@@ -254,12 +261,19 @@ class CallManager {
       return;
     }
 
-    console.log(`📞 CallManager: endCall(${reason}) — ${this._state}`);
+    crashLogger.log(
+      CATEGORIES.CALL_ENDED,
+      `endCall(${reason}) from ${this._state}`,
+    );
     this._session.hasEnded = true;
 
     // Only send hang-up to server if WE initiated the end
     if (reason === "user_hangup" && this._session.callId) {
-      signalingClient.hangUp(this._session.callId);
+      try {
+        signalingClient.hangUp(this._session.callId);
+      } catch (err) {
+        crashLogger.log(CATEGORIES.CALL_ERROR, "hangUp signal failed", err);
+      }
     }
 
     this._transition(STATES.ENDING);
@@ -375,12 +389,22 @@ class CallManager {
     // Callee accepted (caller receives this)
     this._pushUnsub(
       signalingClient.on("call-accepted", async (msg) => {
-        this._touchWatchdog();
-        if (msg.callId === callId() && this._session?.role === "caller") {
-          this._clearCallingTimeout();
-          this._transition(STATES.CONNECTING);
-          this._startConnectingTimeout();
-          await this._initWebRTC(true);
+        try {
+          this._touchWatchdog();
+          if (msg.callId === callId() && this._session?.role === "caller") {
+            this._clearCallingTimeout();
+            this._transition(STATES.CONNECTING);
+            this._startConnectingTimeout();
+            await this._initWebRTC(true);
+          }
+        } catch (err) {
+          crashLogger.log(
+            CATEGORIES.CALL_ERROR,
+            "call-accepted handler error",
+            err,
+          );
+          this._transition(STATES.FAILED);
+          setTimeout(() => this.endCall("handler_error"), 1500);
         }
       }),
     );
@@ -388,9 +412,13 @@ class CallManager {
     // WebRTC Offer
     this._pushUnsub(
       signalingClient.on("offer", async (msg) => {
-        this._touchWatchdog();
-        if (msg.callId === callId()) {
-          await webrtcEngine.handleOffer(msg.sdp);
+        try {
+          this._touchWatchdog();
+          if (msg.callId === callId() && msg.sdp) {
+            await webrtcEngine.handleOffer(msg.sdp);
+          }
+        } catch (err) {
+          crashLogger.log(CATEGORIES.WEBRTC_ERROR, "offer handler error", err);
         }
       }),
     );
@@ -398,9 +426,13 @@ class CallManager {
     // WebRTC Answer
     this._pushUnsub(
       signalingClient.on("answer", async (msg) => {
-        this._touchWatchdog();
-        if (msg.callId === callId()) {
-          await webrtcEngine.handleAnswer(msg.sdp);
+        try {
+          this._touchWatchdog();
+          if (msg.callId === callId() && msg.sdp) {
+            await webrtcEngine.handleAnswer(msg.sdp);
+          }
+        } catch (err) {
+          crashLogger.log(CATEGORIES.WEBRTC_ERROR, "answer handler error", err);
         }
       }),
     );
@@ -408,9 +440,17 @@ class CallManager {
     // ICE Candidate
     this._pushUnsub(
       signalingClient.on("ice-candidate", async (msg) => {
-        this._touchWatchdog();
-        if (msg.callId === callId()) {
-          await webrtcEngine.handleIceCandidate(msg.candidate);
+        try {
+          this._touchWatchdog();
+          if (msg.callId === callId() && msg.candidate) {
+            await webrtcEngine.handleIceCandidate(msg.candidate);
+          }
+        } catch (err) {
+          crashLogger.log(
+            CATEGORIES.WEBRTC_ERROR,
+            "ice-candidate handler error",
+            err,
+          );
         }
       }),
     );
@@ -418,9 +458,17 @@ class CallManager {
     // ICE Restart
     this._pushUnsub(
       signalingClient.on("ice-restart", async (msg) => {
-        this._touchWatchdog();
-        if (msg.callId === callId()) {
-          await webrtcEngine.handleOffer(msg.sdp);
+        try {
+          this._touchWatchdog();
+          if (msg.callId === callId() && msg.sdp) {
+            await webrtcEngine.handleOffer(msg.sdp);
+          }
+        } catch (err) {
+          crashLogger.log(
+            CATEGORIES.WEBRTC_ERROR,
+            "ice-restart handler error",
+            err,
+          );
         }
       }),
     );

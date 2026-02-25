@@ -22,11 +22,20 @@ class AudioEngine {
    * @param {MediaStream} stream - Local or remote audio stream
    */
   startMonitoring(stream) {
+    // ★ Clear any existing interval to prevent leak on double-call
+    if (this.monitorInterval) {
+      clearInterval(this.monitorInterval);
+      this.monitorInterval = null;
+    }
+
     this.isActive = true;
 
     // Poll audio track stats for level detection
     this.monitorInterval = setInterval(() => {
-      if (!stream || !this.isActive) return;
+      if (!stream || !this.isActive) {
+        this.updateLevel(0);
+        return;
+      }
 
       const audioTrack = stream.getAudioTracks()[0];
       if (!audioTrack || !audioTrack.enabled) {
@@ -35,8 +44,6 @@ class AudioEngine {
       }
 
       // Use track settings for basic VAD
-      // In a real implementation, we'd use Web Audio API analyser
-      // React Native WebRTC provides _peerConnectionId for stats
       this.simulateVAD();
     }, 100); // 10fps update for smooth waveform
   }
