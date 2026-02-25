@@ -83,6 +83,35 @@ jobs:
           # Add Notifee local Maven repository to project-level build.gradle
           sed -i "/maven { url 'https:\/\/www.jitpack.io' }/a\\        maven { url \"\$rootDir/../node_modules/@notifee/react-native/android/libs\" }" android/build.gradle
 
+      # ─── Patch: ProGuard keep rules for Firebase + Notifee ─────────────
+      - name: Add FCM/Notifee ProGuard keep rules
+        run: |
+          PROGUARD="android/app/proguard-rules.pro"
+          if ! grep -q 'io.invertase.firebase' "$PROGUARD"; then
+            cat >> "$PROGUARD" << 'PROGUARD_EOF'
+
+          # ★ Firebase Cloud Messaging — background message handler
+          -keep class io.invertase.firebase.** { *; }
+          -keep class com.google.firebase.** { *; }
+          -dontwarn com.google.firebase.**
+
+          # ★ Notifee — background notification display
+          -keep class app.notifee.** { *; }
+          -keep class io.invertase.notifee.** { *; }
+          -dontwarn app.notifee.**
+
+          # ★ Expo Notifications module
+          -keep class expo.modules.notifications.** { *; }
+
+          # ★ React Native headless task runner
+          -keep class com.facebook.react.HeadlessJsTaskService { *; }
+          -keep class com.facebook.react.jstasks.** { *; }
+          PROGUARD_EOF
+            echo "✅ ProGuard keep rules added"
+          else
+            echo "ℹ️  ProGuard keep rules already present"
+          fi
+
       # ─── Patch: Fix manifest merger conflict ─────────────────────────────
       - name: Fix Firebase manifest merger conflict
         run: |

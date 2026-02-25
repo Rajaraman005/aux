@@ -753,94 +753,9 @@ async function unregisterPushNotifications() {
 }
 
 // ─── Background Message Handler ─────────────────────────────────────────────
-// ONLY register if NOT in Expo Go (prevents native bridge crash)
-if (!IS_EXPO_GO) {
-  try {
-    const bgMessaging = require("@react-native-firebase/messaging").default;
-    bgMessaging().setBackgroundMessageHandler(async (remoteMessage) => {
-      console.log("📨 Background FCM message:", remoteMessage.data?.type);
-      const data = remoteMessage.data || {};
-
-      // Load notifee if not already loaded
-      loadNativeModules();
-
-      if (data.type === "call") {
-        // Cancel any basic Android notification (from notification+data push)
-        // before showing the full Notifee notification with Accept/Decline
-        if (notifee) {
-          try {
-            await notifee.cancelAllNotifications();
-          } catch {}
-        }
-        await displayCallNotification(data);
-      } else if (data.type === "message") {
-        // ★ CRITICAL FIX: For data-only pushes, title/body come from
-        // the DATA payload, NOT from remoteMessage.notification (which
-        // is empty for data-only messages). This is why notifications
-        // were not showing — senderName/body were being read from
-        // notification fields that don't exist on data-only pushes.
-        const senderName = data.senderName || data.title || "Someone";
-        const messageBody = data.body || "New message";
-        await displayMessageNotification({
-          senderName,
-          body: messageBody,
-          conversationId: data.conversationId || "",
-          ...data,
-        });
-      } else if (notifee) {
-        // Any other notification type — show generic notification
-        const notification = remoteMessage.notification || {};
-        try {
-          await notifee.displayNotification({
-            title: notification.title || data.title || "Aux",
-            body: notification.body || data.body || "",
-            data,
-            android: {
-              channelId: CHANNELS.GENERAL,
-              smallIcon: NOTIF_SMALL_ICON,
-              color: "#6C63FF",
-              // ★ FIX: launchActivity ensures tapping opens the app
-              pressAction: { id: "default", launchActivity: "default" },
-              importance: AndroidImportance?.HIGH || 4,
-            },
-          });
-        } catch {}
-      }
-    });
-  } catch {
-    // Native module not available
-  }
-
-  // ─── Notifee Background Event Handler ─────────────────────────────────────
-  try {
-    const bgNotifee = require("@notifee/react-native").default;
-    const { EventType: BgEventType } = require("@notifee/react-native");
-    bgNotifee.onBackgroundEvent(async ({ type, detail }) => {
-      const actionId = detail.pressAction?.id;
-      const notifData = detail.notification?.data;
-
-      if (type === BgEventType.ACTION_PRESS) {
-        if (actionId === "accept_call") {
-          await bgNotifee.cancelNotification(CALL_NOTIFICATION_ID);
-          // App will open automatically via fullScreenAction — CallScreen
-          // will detect acceptFromNotification and bootstrap.
-        } else if (actionId === "decline_call" && notifData?.callId) {
-          await bgNotifee.cancelNotification(CALL_NOTIFICATION_ID);
-          // Reject via REST API (no WebSocket available when backgrounded)
-          try {
-            const apiClient = require("./api").default;
-            const { endpoints } = require("../config/api");
-            await apiClient.post(endpoints.calls.reject, {
-              callId: notifData.callId,
-            });
-          } catch {}
-        }
-      }
-    });
-  } catch {
-    // Native module not available
-  }
-}
+// ★ MOVED TO index.js — background handlers MUST be registered at the
+// entry point level (before React components mount) for headless JS
+// execution when the app is killed. See index.js for the handlers.
 
 export {
   initializeNotifications,
