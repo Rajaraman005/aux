@@ -438,7 +438,10 @@ class CallManager {
               reason: "remote_switched",
             });
           } else {
-            webrtcEngine.switchToVideoMode();
+            // ★ Use enableLocalVideo() instead of switchToVideoMode() to avoid
+            // glare — the remote peer will send a renegotiation offer with
+            // their new video track, so we just need to enable our own camera.
+            webrtcEngine.enableLocalVideo();
             this._emit("modeSwitch", {
               mode: "video",
               reason: "remote_switched",
@@ -578,7 +581,11 @@ class CallManager {
       };
 
       const videoEnabled = this._session.callType === "video";
-      await webrtcEngine.initialize(this._session.callId, isCaller, videoEnabled);
+      await webrtcEngine.initialize(
+        this._session.callId,
+        isCaller,
+        videoEnabled,
+      );
       networkMonitor.start(this._session.callId);
 
       if (isCaller) {

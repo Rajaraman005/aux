@@ -616,10 +616,62 @@ class WebRTCEngine {
       // Resume full stats polling
       this.resumeStatsPolling();
 
+      // ★ KEY FIX: Trigger SDP renegotiation so the remote peer
+      // receives the new video track via ontrack event.
+      // Without this, the remote side never gets the video and shows black.
+      try {
+        const offer = await this.pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+        offer.sdp = this.mungeOpusSDP(offer.sdp);
+        await this.pc.setLocalDescription(offer);
+        signalingClient.sendOffer(this.callId, offer);
+        console.log("📹 Renegotiation offer sent after adding video track");
+      } catch (reErr) {
+        console.warn("Renegotiation after video add failed:", reErr.message);
+      }
+
       this.onModeSwitch?.("video", "bandwidth_recovered");
       console.log("📹 Restored video mode");
     } catch (err) {
       console.warn("Failed to restore video:", err.message);
+    }
+  }
+
+  /**
+   * Enable local video track WITHOUT triggering SDP renegotiation.
+   * Used by the RECEIVING side of a call-mode-switch signal.
+   * The SENDING side will trigger renegotiation via switchToVideoMode().
+   */
+  async enableLocalVideo() {
+    if (!this.isAudioOnly) return;
+
+    try {
+      const videoStream = await mediaDevices.getUserMedia({
+        video: VIDEO_CONSTRAINTS,
+      });
+      const videoTrack = videoStream.getVideoTracks()[0];
+
+      this.localStream.addTrack(videoTrack);
+      this.pc.addTrack(videoTrack, this.localStream);
+
+      this.isAudioOnly = false;
+      this.onLocalStream?.(this.localStream);
+
+      if (InCallManager) {
+        try {
+          InCallManager.setForceSpeakerphoneOn(true);
+        } catch (e) {}
+      }
+
+      this.resumeStatsPolling();
+      this.onModeSwitch?.("video", "remote_switched");
+      console.log(
+        "📹 Enabled local video (no renegotiation — waiting for remote offer)",
+      );
+    } catch (err) {
+      console.warn("Failed to enable local video:", err.message);
     }
   }
 

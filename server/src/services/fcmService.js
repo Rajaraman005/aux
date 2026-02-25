@@ -213,15 +213,19 @@ function buildMessage(
       channel_id: channelId,
       click_action: "OPEN_APP",
       default_sound: true,
+      sound: "default",
       notification_priority:
         priority === "high" ? "PRIORITY_MAX" : "PRIORITY_HIGH",
       default_vibrate_timings: true,
+      default_light_settings: true,
     };
 
-    // Call notifications: full-screen intent
+    // Call notifications: full-screen intent + public visibility
     if (channelId === "calls") {
       message.android.notification.visibility = "PUBLIC";
       message.android.notification.notification_priority = "PRIORITY_MAX";
+      // ★ Sticky notification so it stays until user acts on it
+      message.android.notification.sticky = true;
     }
   }
 

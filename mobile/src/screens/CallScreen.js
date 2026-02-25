@@ -857,8 +857,9 @@ export default function CallScreen({ route, navigation }) {
             style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
             onPress={toggleMute}
             activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
-            <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+            <Icon name={isMuted ? "mic-off" : "mic"} size={24} color="#fff" />
           </TouchableOpacity>
 
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
@@ -866,8 +867,9 @@ export default function CallScreen({ route, navigation }) {
               style={styles.endCallBtn}
               onPress={() => handleCallEnd("user_hangup")}
               activeOpacity={0.8}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
-              <Icon name="phone-off" size={26} color="#fff" />
+              <Icon name="phone-off" size={28} color="#fff" />
             </TouchableOpacity>
           </Animated.View>
 
@@ -880,10 +882,11 @@ export default function CallScreen({ route, navigation }) {
               ]}
               onPress={toggleCamera}
               activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <Icon
                 name={isCameraOff ? "video-off" : "video"}
-                size={22}
+                size={24}
                 color="#fff"
               />
             </TouchableOpacity>
@@ -892,8 +895,9 @@ export default function CallScreen({ route, navigation }) {
               style={[styles.controlBtn, styles.switchModeBtn]}
               onPress={handleSwitchCallType}
               activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Icon name="video" size={20} color="#fff" />
+              <Icon name="video" size={22} color="#fff" />
               <Text style={styles.switchModeLabel}>Video</Text>
             </TouchableOpacity>
           )}
@@ -906,8 +910,9 @@ export default function CallScreen({ route, navigation }) {
               style={[styles.controlBtnSmall, styles.switchModeBtn]}
               onPress={handleSwitchCallType}
               activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Icon name="phone" size={16} color="#fff" />
+              <Icon name="phone" size={18} color="#fff" />
               <Text style={styles.switchModeLabel}>Audio Only</Text>
             </TouchableOpacity>
           </View>
@@ -1251,9 +1256,9 @@ const styles = StyleSheet.create({
 
   // ─── Control Buttons ──────────────────────────────────────────────
   controlBtn: {
-    width: 52,
-    height: 52,
-    borderRadius: 16,
+    width: 56,
+    height: 56,
+    borderRadius: 18,
     backgroundColor: "rgba(255, 255, 255, 0.1)",
     justifyContent: "center",
     alignItems: "center",
@@ -1267,11 +1272,11 @@ const styles = StyleSheet.create({
 
   // ─── Switch Mode Button ──────────────────────────────────────────
   switchModeBtn: {
-    paddingHorizontal: 2,
+    paddingHorizontal: 8,
   },
   switchModeLabel: {
-    fontSize: 9,
-    color: "rgba(255,255,255,0.6)",
+    fontSize: 10,
+    color: "rgba(255,255,255,0.7)",
     fontWeight: "600",
     marginTop: 2,
     letterSpacing: 0.3,
@@ -1279,12 +1284,13 @@ const styles = StyleSheet.create({
   secondaryControlRow: {
     flexDirection: "row",
     justifyContent: "center",
-    marginTop: 12,
+    marginTop: 14,
+    marginBottom: 4,
   },
   controlBtnSmall: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 48,
+    height: 48,
+    borderRadius: 16,
     backgroundColor: "rgba(255, 255, 255, 0.1)",
     justifyContent: "center",
     alignItems: "center",

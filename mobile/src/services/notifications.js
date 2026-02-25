@@ -14,6 +14,7 @@ let notifee = null;
 let AndroidImportance = null;
 let AndroidVisibility = null;
 let AndroidCategory = null;
+let AndroidStyle = null;
 let NotifeeEventType = null;
 let isNativeAvailable = false;
 
@@ -31,6 +32,7 @@ function loadNativeModules() {
     AndroidImportance = notifeeModule.AndroidImportance;
     AndroidVisibility = notifeeModule.AndroidVisibility;
     AndroidCategory = notifeeModule.AndroidCategory;
+    AndroidStyle = notifeeModule.AndroidStyle;
     NotifeeEventType = notifeeModule.EventType;
     isNativeAvailable = true;
     console.log("✅ Native push modules loaded (FCM + Notifee)");
@@ -52,6 +54,9 @@ const CHANNELS = {
   CALLS: "calls",
   GENERAL: "general",
 };
+
+// ─── Notification Icon (use ic_launcher which always exists) ─────────────────
+const NOTIF_SMALL_ICON = "ic_launcher";
 
 // ─── Setup Android Notification Channels ────────────────────────────────────
 async function setupNotificationChannels() {
@@ -79,6 +84,7 @@ async function setupNotificationChannels() {
       lightColor: "#FF4444",
       sound: "default",
       visibility: AndroidVisibility.PUBLIC,
+      bypassDnd: true,
     });
 
     await notifee.createChannel({
@@ -223,29 +229,99 @@ async function displayCallNotification(data) {
         category: AndroidCategory?.CALL,
         importance: AndroidImportance.HIGH,
         visibility: AndroidVisibility.PUBLIC,
-        smallIcon: "notification_icon",
+        smallIcon: NOTIF_SMALL_ICON,
+        color: "#6C63FF",
         ongoing: true,
         autoCancel: false,
+        // ★ KEY: asForegroundService ensures the notification displays
+        // even when the app is killed/force-stopped (like WhatsApp calls)
+        asForegroundService: true,
         vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
+        // ★ Sound + loop for continuous ringtone like a real phone call
+        sound: "default",
+        loopSound: true,
         lights: true,
         lightColor: "#FF4444",
+        // ★ Full-screen intent — shows call UI over lock screen
         fullScreenAction: {
           id: "default",
         },
         actions: [
           {
-            title: "Accept",
+            title: "✅ Accept",
             pressAction: { id: "accept_call" },
           },
           {
-            title: "Decline",
+            title: "❌ Decline",
             pressAction: { id: "decline_call" },
           },
         ],
       },
     });
+    console.log(`📞 Displayed call notification: ${callerName} (${callType})`);
   } catch (err) {
     console.error("Call notification display error:", err);
+  }
+}
+
+// ─── Display WhatsApp-Style Message Notification (via Notifee) ──────────────
+async function displayMessageNotification(data) {
+  if (!notifee) return;
+
+  const senderName = data.senderName || data.title || "Someone";
+  const messageText = data.body || data.messagePreview || "New message";
+  const conversationId = data.conversationId || "";
+  const timestamp = Date.now();
+
+  try {
+    // ★ Use a unique ID per conversation so new messages GROUP together
+    const notificationId = `msg-${conversationId || timestamp}`;
+
+    const androidConfig = {
+      channelId: CHANNELS.MESSAGES,
+      importance: AndroidImportance.HIGH,
+      smallIcon: NOTIF_SMALL_ICON,
+      color: "#6C63FF",
+      pressAction: { id: "default" },
+      autoCancel: true,
+      showTimestamp: true,
+      timestamp,
+      // ★ Group notifications by conversation
+      groupId: conversationId || "messages",
+    };
+
+    // ★ WhatsApp-style: messaging style with sender info
+    if (AndroidStyle) {
+      androidConfig.style = {
+        type: AndroidStyle.MESSAGING,
+        person: {
+          name: senderName,
+          icon: `https://api.dicebear.com/7.x/initials/png?seed=${encodeURIComponent(senderName)}`,
+        },
+        messages: [
+          {
+            text: messageText,
+            timestamp,
+            person: {
+              name: senderName,
+              icon: `https://api.dicebear.com/7.x/initials/png?seed=${encodeURIComponent(senderName)}`,
+            },
+          },
+        ],
+      };
+    }
+
+    await notifee.displayNotification({
+      id: notificationId,
+      title: senderName,
+      body: messageText,
+      data: { ...data, type: "message" },
+      android: androidConfig,
+    });
+
+    console.log(`📨 Displayed message notification from ${senderName}`);
+  } catch (err) {
+    console.error("Message notification display error:", err);
   }
 }
 
@@ -264,11 +340,20 @@ async function displayForegroundNotification(remoteMessage) {
   const data = remoteMessage.data || {};
   const notification = remoteMessage.notification || {};
 
+  // ★ For message type, use the WhatsApp-style notification
+  if (data.type === "message") {
+    await displayMessageNotification({
+      senderName: data.senderName || notification.title || "Someone",
+      body: notification.body || data.body || "New message",
+      conversationId: data.conversationId || "",
+      ...data,
+    });
+    return;
+  }
+
   let channelId = CHANNELS.GENERAL;
   if (data.type === "call" || data.type === "missed_call") {
     channelId = CHANNELS.CALLS;
-  } else if (data.type === "message") {
-    channelId = CHANNELS.MESSAGES;
   }
 
   try {
@@ -278,7 +363,8 @@ async function displayForegroundNotification(remoteMessage) {
       data,
       android: {
         channelId,
-        smallIcon: "notification_icon",
+        smallIcon: NOTIF_SMALL_ICON,
+        color: "#6C63FF",
         pressAction: { id: "default" },
         importance:
           data.type === "call"
@@ -552,9 +638,11 @@ if (!IS_EXPO_GO) {
     bgMessaging().setBackgroundMessageHandler(async (remoteMessage) => {
       console.log("📨 Background FCM message:", remoteMessage.data?.type);
       const data = remoteMessage.data || {};
+
+      // Load notifee if not already loaded
+      loadNativeModules();
+
       if (data.type === "call") {
-        // Load notifee if not already loaded
-        loadNativeModules();
         // Cancel any basic Android notification (from notification+data push)
         // before showing the full Notifee notification with Accept/Decline
         if (notifee) {
@@ -563,6 +651,33 @@ if (!IS_EXPO_GO) {
           } catch {}
         }
         await displayCallNotification(data);
+      } else if (data.type === "message") {
+        // ★ KEY FIX: Show WhatsApp-style notification for messages
+        // when app is in background or killed
+        await displayMessageNotification({
+          senderName:
+            data.senderName || remoteMessage.notification?.title || "Someone",
+          body: remoteMessage.notification?.body || data.body || "New message",
+          conversationId: data.conversationId || "",
+          ...data,
+        });
+      } else if (notifee) {
+        // Any other notification type — show generic notification
+        const notification = remoteMessage.notification || {};
+        try {
+          await notifee.displayNotification({
+            title: notification.title || data.title || "Aux",
+            body: notification.body || data.body || "",
+            data,
+            android: {
+              channelId: CHANNELS.GENERAL,
+              smallIcon: NOTIF_SMALL_ICON,
+              color: "#6C63FF",
+              pressAction: { id: "default" },
+              importance: AndroidImportance?.HIGH || 4,
+            },
+          });
+        } catch {}
       }
     });
   } catch {
@@ -607,6 +722,7 @@ export {
   unregisterPushNotifications,
   handleNotificationNavigation,
   displayCallNotification,
+  displayMessageNotification,
   cancelCallNotification,
   setActiveConversationForNotifications,
   CHANNELS,

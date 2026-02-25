@@ -102,17 +102,35 @@ jobs:
           # 1. Disable allowBackup (Play Protect flag: data exfiltration risk)
           sed -i 's|android:allowBackup="true"|android:allowBackup="false"|' "$MANIFEST"
 
-          # 2. Block cleartext traffic in production
-          sed -i 's|android:enableOnBackInvokedCallback="false"|android:enableOnBackInvokedCallback="false" android:networkSecurityConfig="@xml/network_security_config" android:usesCleartextTraffic="false"|' "$MANIFEST"
+          # 2. Add hasFragileUserData="false" (reduces Play Protect risk score)
+          sed -i 's|android:allowBackup="false"|android:allowBackup="false" android:hasFragileUserData="false"|' "$MANIFEST"
 
-          # 3. Scope storage permissions to correct SDK versions
+          # 3. Block cleartext traffic in production + network security config
+          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
+            sed -i 's|android:enableOnBackInvokedCallback="false"|android:enableOnBackInvokedCallback="false" android:networkSecurityConfig="@xml/network_security_config" android:usesCleartextTraffic="false"|' "$MANIFEST"
+          fi
+
+          # 4. Scope storage permissions to correct SDK versions
           sed -i 's|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>|' "$MANIFEST"
           sed -i 's|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:node="replace"/>|' "$MANIFEST"
 
-          # 4. Add FOREGROUND_SERVICE permissions (proper VoIP declaration)
-          sed -i '/<uses-permission android:name="android.permission.WAKE_LOCK"/a\  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>' "$MANIFEST"
+          # 5. Add FOREGROUND_SERVICE permissions (proper VoIP declaration)
+          if ! grep -q 'FOREGROUND_SERVICE"' "$MANIFEST"; then
+            sed -i '/<uses-permission android:name="android.permission.WAKE_LOCK"/a\  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>' "$MANIFEST"
+          fi
 
-          # 5. Create network security config (enforce HTTPS)
+          # 6. Remove dangerous auto-added permissions that trigger Play Protect
+          # Some libraries auto-add READ_PHONE_STATE which is a major red flag
+          if ! grep -q 'tools:node="remove".*READ_PHONE_STATE' "$MANIFEST"; then
+            sed -i '/<\/manifest>/i\  <uses-permission android:name="android.permission.READ_PHONE_STATE" tools:node="remove"/>\n  <uses-permission android:name="android.permission.READ_CALL_LOG" tools:node="remove"/>\n  <uses-permission android:name="android.permission.READ_CONTACTS" tools:node="remove"/>' "$MANIFEST"
+          fi
+
+          # 7. Ensure tools namespace exists
+          if ! grep -q 'xmlns:tools' "$MANIFEST"; then
+            sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android"|<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
+          fi
+
+          # 8. Create network security config (enforce HTTPS)
           mkdir -p android/app/src/main/res/xml
           printf '%s\n' \
             '<?xml version="1.0" encoding="utf-8"?>' \
@@ -125,11 +143,43 @@ jobs:
             '</network-security-config>' \
             > android/app/src/main/res/xml/network_security_config.xml
 
-          # 6. Enable R8 minification + resource shrinking
+          # 9. Enable R8 full mode + ProGuard for proper obfuscation
           GRADLE_PROPS="android/gradle.properties"
           echo "" >> "$GRADLE_PROPS"
+          echo "# ★ Play Protect compliance: R8 minification + shrinking" >> "$GRADLE_PROPS"
           echo "android.enableMinifyInReleaseBuilds=true" >> "$GRADLE_PROPS"
           echo "android.enableShrinkResourcesInReleaseBuilds=true" >> "$GRADLE_PROPS"
+          echo "android.enableR8.fullMode=true" >> "$GRADLE_PROPS"
+
+          # 10. Ensure release build is not debuggable (critical for Play Protect)
+          APP_GRADLE="android/app/build.gradle"
+          if ! grep -q 'debuggable false' "$APP_GRADLE"; then
+            sed -i '/buildTypes {/,/release {/ {
+              /release {/a\            debuggable false\n            jniDebuggable false
+            }' "$APP_GRADLE"
+          fi
+
+          # 11. Add ProGuard rules to strip debug info from release
+          mkdir -p android/app
+          cat > android/app/proguard-rules-custom.pro << 'EOF'
+          # Remove logging from release builds (reduces Play Protect suspicion)
+          -assumenosideeffects class android.util.Log {
+              public static int d(...);
+              public static int v(...);
+              public static int i(...);
+          }
+          # Keep Firebase and Notifee service classes
+          -keep class io.invertase.firebase.** { *; }
+          -keep class app.notifee.** { *; }
+          -keep class com.auxi.app.** { *; }
+          EOF
+
+          # Add custom ProGuard rules to build.gradle if not already there
+          if ! grep -q 'proguard-rules-custom.pro' "$APP_GRADLE"; then
+            sed -i 's|proguardFiles getDefaultProguardFile("proguard-android.txt")|proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules-custom.pro"|' "$APP_GRADLE"
+          fi
+
+          echo "✅ Security hardening applied"
 
       # ─── Copy google-services.json ───────────────────────────────────────
       - name: Setup Firebase config
