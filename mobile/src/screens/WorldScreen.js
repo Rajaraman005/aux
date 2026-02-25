@@ -69,7 +69,11 @@ function formatTime(dateStr) {
   if (diffMins < 1) return "just now";
   if (diffMins < 60) return `${diffMins}m ago`;
   if (diffMins < 1440)
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return date.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 

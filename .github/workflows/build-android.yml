@@ -87,10 +87,12 @@ jobs:
       - name: Fix Firebase manifest merger conflict
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          # Add tools namespace to <manifest> tag if not present
-          sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android"|<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
-          # Add tools:replace to the notification color meta-data to override Firebase's value
-          sed -i 's|<meta-data android:name="com.google.firebase.messaging.default_notification_color"|<meta-data tools:replace="android:resource" android:name="com.google.firebase.messaging.default_notification_color"|' "$MANIFEST"
+          # Only add tools namespace if not already present (expo prebuild usually includes it)
+          if ! grep -q 'xmlns:tools' "$MANIFEST"; then
+            sed -i 's|<manifest xmlns:android="http://schemas.android.com/apk/res/android"|<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"|' "$MANIFEST"
+          fi
+          # Add tools:replace to the notification color meta-data to resolve the merge conflict
+          sed -i 's|<meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/notification_icon_color"/>|<meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/notification_icon_color" tools:replace="android:resource"/>|' "$MANIFEST"
 
       # ─── Copy google-services.json ───────────────────────────────────────
       - name: Setup Firebase config
