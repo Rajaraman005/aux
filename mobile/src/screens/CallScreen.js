@@ -852,28 +852,14 @@ export default function CallScreen({ route, navigation }) {
         pointerEvents={controlsVisible ? "auto" : "none"}
       >
         <View style={styles.controlRow}>
-          {/* Camera toggle — only shown for video calls */}
-          {currentCallType === "video" ? (
-            <TouchableOpacity
-              style={[styles.controlBtn, isCameraOff && styles.controlBtnActive]}
-              onPress={toggleCamera}
-              activeOpacity={0.7}
-            >
-              <Icon
-                name={isCameraOff ? "video-off" : "video"}
-                size={22}
-                color="#fff"
-              />
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
-              onPress={toggleMute}
-              activeOpacity={0.7}
-            >
-              <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
-            </TouchableOpacity>
-          )}
+          {/* Always show Mute on the left */}
+          <TouchableOpacity
+            style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
+            onPress={toggleMute}
+            activeOpacity={0.7}
+          >
+            <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+          </TouchableOpacity>
 
           <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
             <TouchableOpacity
@@ -885,42 +871,44 @@ export default function CallScreen({ route, navigation }) {
             </TouchableOpacity>
           </Animated.View>
 
-          {/* Switch call type — voice↔video (WhatsApp-style) */}
-          {isConnected ? (
+          {/* Always show Camera related action on the right */}
+          {currentCallType === "video" ? (
+            <TouchableOpacity
+              style={[
+                styles.controlBtn,
+                isCameraOff && styles.controlBtnActive,
+              ]}
+              onPress={toggleCamera}
+              activeOpacity={0.7}
+            >
+              <Icon
+                name={isCameraOff ? "video-off" : "video"}
+                size={22}
+                color="#fff"
+              />
+            </TouchableOpacity>
+          ) : (
             <TouchableOpacity
               style={[styles.controlBtn, styles.switchModeBtn]}
               onPress={handleSwitchCallType}
               activeOpacity={0.7}
             >
-              <Icon
-                name={currentCallType === "voice" ? "video" : "phone"}
-                size={20}
-                color="#fff"
-              />
-              <Text style={styles.switchModeLabel}>
-                {currentCallType === "voice" ? "Video" : "Audio"}
-              </Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              style={[styles.controlBtn, isMuted && styles.controlBtnActive]}
-              onPress={toggleMute}
-              activeOpacity={0.7}
-            >
-              <Icon name={isMuted ? "mic-off" : "mic"} size={22} color="#fff" />
+              <Icon name="video" size={20} color="#fff" />
+              <Text style={styles.switchModeLabel}>Video</Text>
             </TouchableOpacity>
           )}
         </View>
 
-        {/* Secondary row — mute for video mode when connected */}
+        {/* Secondary row — Switch to audio for video mode when connected */}
         {currentCallType === "video" && isConnected && (
           <View style={styles.secondaryControlRow}>
             <TouchableOpacity
-              style={[styles.controlBtnSmall, isMuted && styles.controlBtnActive]}
-              onPress={toggleMute}
+              style={[styles.controlBtnSmall, styles.switchModeBtn]}
+              onPress={handleSwitchCallType}
               activeOpacity={0.7}
             >
-              <Icon name={isMuted ? "mic-off" : "mic"} size={18} color="#fff" />
+              <Icon name="phone" size={16} color="#fff" />
+              <Text style={styles.switchModeLabel}>Audio Only</Text>
             </TouchableOpacity>
           </View>
         )}

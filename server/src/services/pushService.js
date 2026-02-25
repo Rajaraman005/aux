@@ -1,25 +1,7 @@
-/**
- * Push Notification Service — Enterprise-Grade Native FCM.
- *
- * ★ Complete rewrite: Expo Push API → Native FCM HTTP v1
- *
- * Features:
- *   - Multi-device: sends to ALL active user devices simultaneously
- *   - Token cleanup: auto-deactivates invalid FCM tokens
- *   - Rate limiting: per-user cooldown (configurable per notification type)
- *   - Priority levels: "high" for calls, "normal" for messages
- *   - Retry with exponential backoff on transient failures
- *   - Async queue: non-blocking push delivery
- *   - Notification preferences: respects per-user per-type settings
- *   - Metrics: tracks sent, failed, cleaned tokens, rate-limited
- *   - Deduplication: prevents redundant pushes within cooldown window
- *
- * Architecture:
- *   User Action → Event → Queue → pushService → fcmService → Google → Device
- */
 const { db } = require("../db/supabase");
 const presence = require("../signaling/presence");
 const fcmService = require("./fcmService");
+const expoPushService = require("./expoPushService");
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 const MAX_RETRIES = 3;
@@ -51,6 +33,7 @@ const pushMetrics = {
       push_rate_limited: this.rateLimited,
       push_prefs_blocked: this.preferencesBlocked,
       ...fcmService.fcmMetrics.getStats(),
+      ...expoPushService.expoMetrics.getStats(),
     };
   },
 };
@@ -114,7 +97,20 @@ async function isPushAllowed(userId, type) {
   }
 }
 
-// ─── Execute Push (FCM native) ──────────────────────────────────────────────
+// ─── Token Cleanup Callback ─────────────────────────────────────────────────
+async function cleanupInvalidToken(token, deviceId) {
+  try {
+    await db.deactivateDeviceByToken(token);
+    pushMetrics.tokensCleanedUp++;
+    console.log(
+      `🧹 Deactivated device with invalid token: ${token.slice(0, 20)}...`,
+    );
+  } catch (err) {
+    console.error("Device deactivation error:", err.message);
+  }
+}
+
+// ─── Execute Push (Dual-Mode: FCM + Expo) ──────────────────────────────────
 async function executePush({
   devices,
   title,
@@ -126,12 +122,23 @@ async function executePush({
 }) {
   if (!devices || devices.length === 0) return;
 
-  // Filter to only devices with FCM tokens
+  // ★ Split devices by token type: FCM vs Expo
   const fcmDevices = devices.filter(
-    (d) => d.push_token && (d.token_type === "fcm" || d.platform === "android"),
+    (d) =>
+      d.push_token &&
+      !expoPushService.isExpoToken(d.push_token) &&
+      (d.token_type === "fcm" || d.platform === "android"),
+  );
+  const expoDevices = devices.filter(
+    (d) =>
+      d.push_token &&
+      (d.token_type === "expo" || expoPushService.isExpoToken(d.push_token)),
   );
 
-  if (fcmDevices.length === 0) return;
+  if (fcmDevices.length === 0 && expoDevices.length === 0) {
+    console.log("⚠️  No valid push tokens found for any device");
+    return;
+  }
 
   const options = {
     title,
@@ -142,28 +149,40 @@ async function executePush({
     dataOnly: dataOnly || false,
   };
 
-  // Retry wrapper
+  // ★ Send to both FCM and Expo devices in parallel
+  const promises = [];
+
+  // ── FCM Path ──────────────────────────────────────────────────────────
+  if (fcmDevices.length > 0) {
+    console.log(`📤 Sending FCM push to ${fcmDevices.length} device(s)`);
+    promises.push(sendViaFCM(fcmDevices, options));
+  }
+
+  // ── Expo Path ─────────────────────────────────────────────────────────
+  if (expoDevices.length > 0) {
+    console.log(`📤 Sending Expo push to ${expoDevices.length} device(s)`);
+    promises.push(sendViaExpo(expoDevices, options));
+  }
+
+  const allResults = await Promise.allSettled(promises);
+  return allResults.flatMap((r) =>
+    r.status === "fulfilled"
+      ? r.value
+      : [{ success: false, error: r.reason?.message }],
+  );
+}
+
+// ─── FCM Send with Retries ──────────────────────────────────────────────────
+async function sendViaFCM(fcmDevices, options) {
   let attempt = 0;
   while (attempt <= MAX_RETRIES) {
     try {
       const results = await fcmService.sendToDevices(
         fcmDevices,
         options,
-        // Callback for invalid token cleanup
-        async (token, deviceId) => {
-          try {
-            await db.deactivateDeviceByToken(token);
-            pushMetrics.tokensCleanedUp++;
-            console.log(
-              `🧹 Deactivated device with invalid token: ${token.slice(0, 20)}...`,
-            );
-          } catch (err) {
-            console.error("Device deactivation error:", err.message);
-          }
-        },
+        cleanupInvalidToken,
       );
 
-      // Count successes/failures
       for (const result of results) {
         if (result.success) {
           pushMetrics.sent++;
@@ -176,14 +195,39 @@ async function executePush({
     } catch (err) {
       attempt++;
       if (attempt > MAX_RETRIES) {
-        console.error("Push delivery failed after retries:", err.message);
+        console.error("FCM push failed after retries:", err.message);
         pushMetrics.failed += fcmDevices.length;
         return [];
       }
       const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-      console.log(`Push retry ${attempt}/${MAX_RETRIES} in ${delay}ms...`);
+      console.log(`FCM retry ${attempt}/${MAX_RETRIES} in ${delay}ms...`);
       await new Promise((r) => setTimeout(r, delay));
     }
+  }
+}
+
+// ─── Expo Push Send ─────────────────────────────────────────────────────────
+async function sendViaExpo(expoDevices, options) {
+  try {
+    const results = await expoPushService.sendToDevices(
+      expoDevices,
+      options,
+      cleanupInvalidToken,
+    );
+
+    for (const result of results) {
+      if (result.success) {
+        pushMetrics.sent++;
+      } else {
+        pushMetrics.failed++;
+      }
+    }
+
+    return results;
+  } catch (err) {
+    console.error("Expo push error:", err.message);
+    pushMetrics.failed += expoDevices.length;
+    return [];
   }
 }
 
@@ -226,14 +270,6 @@ async function sendMessagePush(recipientId, senderName, messagePreview) {
   });
 }
 
-/**
- * Send high-priority push for incoming call.
- * ★ FIX: ALWAYS sends, even if user is online — needed for background/locked screen wake-up.
- *    Unlike message pushes, call pushes must bypass the online check because:
- *    1. App may be backgrounded (WS still connected, but screen locked)
- *    2. Push is the only way to trigger full-screen incoming call on Android
- *    3. Call pushes have their own rate limiting (2 per 10s)
- */
 async function sendCallPush(
   targetUserId,
   callerId,
@@ -325,9 +361,6 @@ async function sendFriendRequestPush(targetUserId, senderName) {
   });
 }
 
-/**
- * Send silent data-only push (for badge sync, etc.).
- */
 async function sendSilentPush(targetUserId, data) {
   const devices = await db.getActiveDevices(targetUserId);
   if (devices.length === 0) return;

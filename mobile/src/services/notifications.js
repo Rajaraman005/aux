@@ -1,15 +1,6 @@
-/**
- * Push Notification Service — Native FCM with Expo Go Fallback.
- *
- * ★ Dual-Mode Architecture:
- *   - Dev build (expo run:android): Full native FCM + Notifee
- *   - Expo Go (expo start): Graceful no-op (app works, just no push)
- *
- * ★ KEY: We detect Expo Go via expo-constants BEFORE any Firebase require().
- *   This prevents the native bridge crash (RNFBAppModule not found).
- */
 import { Platform } from "react-native";
 import Constants from "expo-constants";
+import * as ExpoNotifications from "expo-notifications";
 import apiClient from "../services/api";
 import { endpoints } from "../config/api";
 
@@ -47,7 +38,9 @@ function loadNativeModules() {
     isNativeAvailable = false;
     messaging = null;
     notifee = null;
-    console.log("⚠️  Native push modules not available — push disabled");
+    console.log(
+      "⚠️  Native push modules not available — using Expo Push fallback",
+    );
   }
 
   return isNativeAvailable;
@@ -125,22 +118,66 @@ async function getFCMToken() {
   }
 }
 
+// ─── Get Expo Push Token (Expo Go Fallback) ─────────────────────────────────
+async function getExpoPushToken() {
+  try {
+    // Request permission
+    const { status: existingStatus } =
+      await ExpoNotifications.getPermissionsAsync();
+    let finalStatus = existingStatus;
+
+    if (existingStatus !== "granted") {
+      const { status } = await ExpoNotifications.requestPermissionsAsync();
+      finalStatus = status;
+    }
+
+    if (finalStatus !== "granted") {
+      console.log("⚠️  Expo push notification permission denied");
+      return null;
+    }
+
+    // Get Expo Push Token using the project ID from app.json
+    const projectId =
+      Constants.expoConfig?.extra?.eas?.projectId ??
+      Constants.easConfig?.projectId;
+
+    if (!projectId) {
+      console.error(
+        "❌ No Expo project ID found. Add it to app.json under extra.eas.projectId",
+      );
+      return null;
+    }
+
+    const tokenData = await ExpoNotifications.getExpoPushTokenAsync({
+      projectId,
+    });
+
+    const token = tokenData.data;
+    console.log("📱 Expo Push Token:", token);
+    return token;
+  } catch (err) {
+    console.error("Expo push token error:", err);
+    return null;
+  }
+}
+
 // ─── Register Token with Server ─────────────────────────────────────────────
-async function registerTokenWithServer(token) {
+async function registerTokenWithServer(token, tokenType = "fcm") {
   try {
     const deviceInfo = {
       token,
       platform: Platform.OS,
-      tokenType: "fcm",
+      tokenType,
       deviceId: getDeviceId(),
       appVersion: "1.0.1",
       osVersion: `${Platform.OS} ${Platform.Version}`,
+      deviceName: Constants.deviceName || "Unknown Device",
     };
 
     await apiClient.post(endpoints.push.register, deviceInfo);
-    console.log("📱 FCM token registered with server");
+    console.log(`📱 Push token registered with server (type: ${tokenType})`);
   } catch (err) {
-    console.error("Failed to register FCM token with server:", err);
+    console.error("Failed to register push token with server:", err);
   }
 }
 
@@ -302,25 +339,69 @@ function handleNotificationNavigation(data, navigationRef) {
 let tokenRefreshUnsubscribe = null;
 let foregroundUnsubscribe = null;
 let notifeeEventUnsubscribe = null;
-let lastFCMToken = null;
+let expoNotifSubscription = null;
+let expoResponseSubscription = null;
+let lastPushToken = null;
 
 async function initializeNotifications(navigationRef) {
   const native = loadNativeModules();
 
+  if (!native && IS_EXPO_GO) {
+    // ★ EXPO GO MODE: Use expo-notifications for foreground handling
+    console.log(
+      "📱 Expo Go mode — using Expo Push Notifications for push support",
+    );
+
+    // Configure how foreground notifications are displayed
+    ExpoNotifications.setNotificationHandler({
+      handleNotification: async (notification) => {
+        const data = notification.request.content.data || {};
+        return {
+          shouldShowAlert: true,
+          shouldPlaySound: data.type === "call" || data.type === "message",
+          shouldSetBadge: true,
+        };
+      },
+    });
+
+    // Handle notification received while app is in foreground
+    expoNotifSubscription = ExpoNotifications.addNotificationReceivedListener(
+      (notification) => {
+        console.log(
+          "📨 Expo foreground notification:",
+          notification.request.content.data?.type,
+        );
+      },
+    );
+
+    // Handle notification tap (app was in background or killed)
+    expoResponseSubscription =
+      ExpoNotifications.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data || {};
+        console.log("📨 Notification tapped:", data.type);
+        setTimeout(() => {
+          handleNotificationNavigation(data, navigationRef);
+        }, 500);
+      });
+
+    return;
+  }
+
   if (!native) {
     console.log(
-      "ℹ️  Push notifications disabled (Expo Go). Use `npx expo run:android` for push support.",
+      "ℹ️  Push notifications disabled (no native modules and not Expo Go).",
     );
     return;
   }
 
+  // ─── NATIVE MODE (Dev Build) ────────────────────────────────────────────
   await setupNotificationChannels();
 
   // Token Refresh Listener
   tokenRefreshUnsubscribe = messaging().onTokenRefresh(async (newToken) => {
     console.log("📱 FCM token refreshed");
-    lastFCMToken = newToken;
-    await registerTokenWithServer(newToken);
+    lastPushToken = newToken;
+    await registerTokenWithServer(newToken, "fcm");
   });
 
   // Foreground Message Handler
@@ -400,28 +481,51 @@ function cleanupNotifications() {
     notifeeEventUnsubscribe();
     notifeeEventUnsubscribe = null;
   }
+  if (expoNotifSubscription) {
+    expoNotifSubscription.remove();
+    expoNotifSubscription = null;
+  }
+  if (expoResponseSubscription) {
+    expoResponseSubscription.remove();
+    expoResponseSubscription = null;
+  }
 }
 
 // ─── Full Registration Flow ─────────────────────────────────────────────────
 async function registerPushNotifications() {
   loadNativeModules();
 
-  if (!isNativeAvailable) {
-    console.log("⚠️  Push registration skipped (Expo Go mode)");
-    return null;
+  if (isNativeAvailable) {
+    // ★ NATIVE MODE: Use FCM token
+    const token = await getFCMToken();
+    if (token) {
+      lastPushToken = token;
+      await registerTokenWithServer(token, "fcm");
+    }
+    return token;
   }
 
-  const token = await getFCMToken();
-  if (token) {
-    lastFCMToken = token;
-    await registerTokenWithServer(token);
+  if (IS_EXPO_GO) {
+    // ★ EXPO GO MODE: Use Expo Push Token
+    console.log("📱 Registering Expo Push Token (Expo Go mode)...");
+    const token = await getExpoPushToken();
+    if (token) {
+      lastPushToken = token;
+      await registerTokenWithServer(token, "expo");
+      console.log("✅ Expo Push Token registered successfully");
+    } else {
+      console.log("❌ Failed to get Expo Push Token");
+    }
+    return token;
   }
-  return token;
+
+  console.log("⚠️  Push registration skipped (no push mechanism available)");
+  return null;
 }
 
 async function unregisterPushNotifications() {
   await unregisterTokenFromServer();
-  lastFCMToken = null;
+  lastPushToken = null;
 }
 
 // ─── Background Message Handler ─────────────────────────────────────────────
