@@ -94,6 +94,43 @@ jobs:
           # Add tools:replace to the notification color meta-data to resolve the merge conflict
           sed -i 's|<meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/notification_icon_color"/>|<meta-data android:name="com.google.firebase.messaging.default_notification_color" android:resource="@color/notification_icon_color" tools:replace="android:resource"/>|' "$MANIFEST"
 
+      # ─── Patch: Play Protect compliance fixes ──────────────────────────
+      - name: Apply security hardening
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          # 1. Disable allowBackup (Play Protect flag: data exfiltration risk)
+          sed -i 's|android:allowBackup="true"|android:allowBackup="false"|' "$MANIFEST"
+
+          # 2. Block cleartext traffic in production
+          sed -i 's|android:enableOnBackInvokedCallback="false"|android:enableOnBackInvokedCallback="false" android:networkSecurityConfig="@xml/network_security_config" android:usesCleartextTraffic="false"|' "$MANIFEST"
+
+          # 3. Scope storage permissions to correct SDK versions
+          sed -i 's|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>|<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>|' "$MANIFEST"
+          sed -i 's|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>|<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:node="replace"/>|' "$MANIFEST"
+
+          # 4. Add FOREGROUND_SERVICE permissions (proper VoIP declaration)
+          sed -i '/<uses-permission android:name="android.permission.WAKE_LOCK"/a\  <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>' "$MANIFEST"
+
+          # 5. Create network security config (enforce HTTPS)
+          mkdir -p android/app/src/main/res/xml
+          cat > android/app/src/main/res/xml/network_security_config.xml << 'XMLEOF'
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>
+XMLEOF
+
+          # 6. Enable R8 minification + resource shrinking
+          GRADLE_PROPS="android/gradle.properties"
+          echo "" >> "$GRADLE_PROPS"
+          echo "android.enableMinifyInReleaseBuilds=true" >> "$GRADLE_PROPS"
+          echo "android.enableShrinkResourcesInReleaseBuilds=true" >> "$GRADLE_PROPS"
+
       # ─── Copy google-services.json ───────────────────────────────────────
       - name: Setup Firebase config
         run: |

@@ -23,7 +23,12 @@
     },
     "production": {
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "image": "latest",
+        "credentialsSource": "local"
+      },
+      "env": {
+        "EX_DEV_CLIENT_NETWORK_INSPECTOR": "false"
       }
     }
   },
