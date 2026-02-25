@@ -289,6 +289,12 @@ async function sendCallPush(
   if (devices.length === 0) return;
 
   const isVoice = callType === "voice";
+  // ★ Data-only push for calls — CRITICAL for WhatsApp-level behavior.
+  // Android ONLY fires the background JS handler for data-only messages.
+  // If a notification payload is present, Android shows its OWN basic
+  // notification and does NOT wake the background handler.
+  // The mobile background handler will create the full-screen Notifee
+  // notification with Accept/Decline buttons.
   enqueuePush({
     devices,
     title: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
@@ -299,9 +305,13 @@ async function sendCallPush(
       callerId,
       callerName,
       callType,
+      // ★ Include display info in data for mobile background handler
+      notifTitle: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
+      notifBody: `${callerName} is calling you...`,
     },
     priority: "high",
     channelId: "calls",
+    dataOnly: true, // ★ This is the key — no notification payload
   });
 }
 

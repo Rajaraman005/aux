@@ -92,6 +92,24 @@ function initializeSignaling(wss) {
       }),
     );
 
+    // ★ Deliver pending incoming-call if user was woken by push notification
+    for (const [callId, call] of activeCalls) {
+      if (
+        call.calleeId === userId &&
+        call.state === "ringing" &&
+        call.pendingCallMessage
+      ) {
+        console.log(
+          `📞 Delivering pending call ${callId} to push-woken user ${userId}`,
+        );
+        ws.send(JSON.stringify(call.pendingCallMessage));
+        // Clear pending flag — message delivered
+        delete call.pendingCallMessage;
+        call.pushWakeUp = false;
+        break; // Only one pending call at a time
+      }
+    }
+
     // ─── Heartbeat ──────────────────────────────────────────────────────
     // ★ Heartbeat every 25s — 3.6× safety margin against 90s Redis TTL
     const heartbeatInterval = setInterval(async () => {
@@ -251,28 +269,7 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
   const user = await db.getUserById(callerId);
   const callerAvatar = user?.avatar_url || user?.avatar_seed || callerId;
 
-  // Check if target is online
-  const targetOnline = await presence.isOnline(targetUserId);
-  if (!targetOnline) {
-    // Send high-priority push notification for incoming call
-    await sendCallPush(targetUserId, callerId, callerName, uuidv4(), callType);
-    callerWs.send(
-      JSON.stringify({
-        type: "call-failed",
-        reason: "user_offline",
-        targetUserId,
-      }),
-    );
-    metrics.callFailures.inc({ reason: "user_offline" });
-    return;
-  }
-
-  // ★ ALWAYS send call push even when online — needed for background/locked screen wake-up
-  sendCallPush(targetUserId, callerId, callerName, uuidv4(), callType).catch(
-    (err) => console.error("Call push error (non-blocking):", err.message),
-  );
-
-  // Check if either party is already in a call
+  // ★ Check if either party is already in a call (BEFORE creating new call)
   for (const [, call] of activeCalls) {
     if (
       call.state !== "ended" &&
@@ -294,31 +291,73 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     }
   }
 
-  // Create call
+  // ★ Create call FIRST — before checking online status
+  // This ensures the call exists for push-woken users to join
   const callId = uuidv4();
-  activeCalls.set(callId, {
+  const callData = {
     callerId,
     calleeId: targetUserId,
     callerName,
-    callType,
-    startedAt: Date.now(),
-    state: "ringing", // ringing -> connecting -> active -> ended
-  });
-
-  metrics.activeCalls.inc();
-
-  // Notify callee
-  await presence.sendToUser(targetUserId, {
-    type: "incoming-call",
-    callId,
-    callerId,
-    callerName,
     callerAvatar,
     callType,
-    timestamp: Date.now(),
+    startedAt: Date.now(),
+    state: "ringing",
+    // ★ Track whether callee was woken via push (for logging/metrics)
+    pushWakeUp: false,
+  };
+  activeCalls.set(callId, callData);
+  metrics.activeCalls.inc();
+
+  // Create call log
+  await db.createCallLog({
+    id: callId,
+    caller_id: callerId,
+    callee_id: targetUserId,
+    started_at: new Date().toISOString(),
   });
 
-  // Confirm to caller
+  // Check if target is online
+  const targetOnline = await presence.isOnline(targetUserId);
+
+  // ★ ALWAYS send call push with the REAL callId — needed for:
+  //   1. Offline users: wakes device, shows full-screen call UI
+  //   2. Background users: wakes app, shows lock-screen call notification
+  //   3. Foreground users: backup in case WebSocket message is delayed
+  sendCallPush(targetUserId, callerId, callerName, callId, callType).catch(
+    (err) => console.error("Call push error (non-blocking):", err.message),
+  );
+
+  if (targetOnline) {
+    // ── Online: deliver via WebSocket immediately ──────────────────────
+    await presence.sendToUser(targetUserId, {
+      type: "incoming-call",
+      callId,
+      callerId,
+      callerName,
+      callerAvatar,
+      callType,
+      timestamp: Date.now(),
+    });
+  } else {
+    // ── Offline: mark as push wake-up, store pending call data ─────────
+    callData.pushWakeUp = true;
+    // ★ Store the incoming-call message so we can deliver it when the
+    //   callee reconnects via push wake-up (handleCallRejoin)
+    callData.pendingCallMessage = {
+      type: "incoming-call",
+      callId,
+      callerId,
+      callerName,
+      callerAvatar,
+      callType,
+      timestamp: Date.now(),
+    };
+    console.log(
+      `📞 Call ${callId}: ${callerName} → offline user ${targetUserId} (push sent, waiting for wake-up)`,
+    );
+  }
+
+  // Confirm to caller — ALWAYS show "ringing" (even for offline users)
   callerWs.send(
     JSON.stringify({
       type: "call-ringing",
@@ -328,7 +367,7 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     }),
   );
 
-  // Auto-timeout after 30s if no answer
+  // ★ Auto-timeout after 45s (extended from 30s to allow push wake-up)
   setTimeout(async () => {
     const call = activeCalls.get(callId);
     if (call && call.state === "ringing") {
@@ -346,15 +385,7 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
       await sendMissedCallPush(targetUserId, callerName);
       await finalizeCall(callId, "no_answer");
     }
-  }, 30000);
-
-  // Create call log
-  await db.createCallLog({
-    id: callId,
-    caller_id: callerId,
-    callee_id: targetUserId,
-    started_at: new Date().toISOString(),
-  });
+  }, 45000);
 }
 
 async function handleCallAccept(userId, message) {
