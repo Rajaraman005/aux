@@ -31,47 +31,45 @@ import crashLogger, { CATEGORIES } from "./src/services/CrashLogger";
 // 1. Catch all unhandled JS exceptions (synchronous throws, etc.)
 const defaultHandler = ErrorUtils.getGlobalHandler();
 ErrorUtils.setGlobalHandler((error, isFatal) => {
-  crashLogger.log(
-    CATEGORIES.CRASH_DETECTED,
-    `Unhandled ${isFatal ? "FATAL" : "non-fatal"} JS error`,
-    error,
-  );
-
-  // ★ For non-fatal errors, swallow them to prevent app crash.
-  // For fatal errors, call the default handler which shows the red screen in dev
-  // and would normally crash in production — but at least we've logged it.
-  if (isFatal) {
-    // In production, we log and let the default handler decide.
-    // The ErrorBoundary in App.js will catch React tree errors.
-    if (__DEV__) {
-      defaultHandler?.(error, isFatal);
-    }
-    // In production, do NOT re-throw fatal errors — let ErrorBoundary handle UI
-  } else {
-    // Non-fatal: log only, do not crash
-    if (__DEV__) {
-      defaultHandler?.(error, isFatal);
-    }
+  try {
+    crashLogger.log(
+      CATEGORIES.CRASH_DETECTED,
+      `Unhandled ${isFatal ? "FATAL" : "non-fatal"} JS error`,
+      error,
+    );
+  } catch (_) {
+    // CrashLogger itself failed — don't make things worse
   }
+
+  if (isFatal) {
+    // ★ ALWAYS forward fatal errors to the default handler.
+    // Swallowing fatals causes a white screen because the app state is corrupt.
+    // The ErrorBoundary in App.js handles React-level errors with a recovery UI.
+    defaultHandler?.(error, isFatal);
+  }
+  // Non-fatal: log only, do not crash
 });
 
-// 2. Catch all unhandled Promise rejections
-if (typeof global !== "undefined") {
+// 2. Catch unhandled Promise rejections (wrapped in try-catch for safety)
+try {
   const tracking = require("promise/setimmediate/rejection-tracking");
   tracking.enable({
     allRejections: true,
     onUnhandled: (_id, error) => {
-      crashLogger.log(
-        CATEGORIES.PROMISE_REJECTION,
-        "Unhandled Promise rejection",
-        error instanceof Error ? error : new Error(String(error)),
-      );
+      try {
+        crashLogger.log(
+          CATEGORIES.PROMISE_REJECTION,
+          "Unhandled Promise rejection",
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      } catch (_) {}
       // ★ Do NOT re-throw — swallow to prevent crash
     },
-    onHandled: () => {
-      // Promise was eventually handled — no action needed
-    },
+    onHandled: () => {},
   });
+} catch (_) {
+  // Module not available in this RN version — that's fine,
+  // the global error handler above catches most issues anyway.
 }
 
 crashLogger.log(CATEGORIES.APP_START, "index.js loaded — app process starting");
@@ -278,4 +276,5 @@ if (Platform.OS !== "web") {
 }
 
 // ─── Register the App Component ──────────────────────────────────────────────
+// ★ Must be "main" to match MainActivity.kt getMainComponentName()
 AppRegistry.registerComponent(appConfig.name || "main", () => App);
