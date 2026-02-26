@@ -140,7 +140,6 @@ export default function CallScreen({ route, navigation }) {
     { length: 12 },
     () => useRef(new Animated.Value(0.3)).current,
   );
-  const glowAnim = useRef(new Animated.Value(0)).current;
   const overlayAnim = useRef(new Animated.Value(1)).current;
   const ringAnims = [
     useRef(new Animated.Value(0)).current,
@@ -151,16 +150,33 @@ export default function CallScreen({ route, navigation }) {
   // ─── Draggable PiP State ────────────────────────────────────────────────────
   const { width: screenWidth, height: screenHeight } = Dimensions.get("window");
   const pipPan = useRef(new Animated.ValueXY()).current;
+  const pipScale = useRef(new Animated.Value(1)).current;
+  // ★ Separate JS-driven opacity for PIP — can't share overlayAnim (native-driven)
+  // because pipPan uses useNativeDriver: false for drag gestures.
+  const pipOpacity = useRef(new Animated.Value(1)).current;
+
+  const panValue = useRef({ x: 0, y: 0 });
+  useEffect(() => {
+    const listener = pipPan.addListener((value) => {
+      panValue.current = value;
+    });
+    return () => pipPan.removeListener(listener);
+  }, [pipPan]);
 
   const pipPanResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
         pipPan.setOffset({
-          x: pipPan.x._value,
-          y: pipPan.y._value,
+          x: panValue.current.x,
+          y: panValue.current.y,
         });
         pipPan.setValue({ x: 0, y: 0 });
+        Animated.spring(pipScale, {
+          toValue: 0.95,
+          friction: 7,
+          useNativeDriver: false,
+        }).start();
       },
       onPanResponderMove: Animated.event(
         [null, { dx: pipPan.x, dy: pipPan.y }],
@@ -168,6 +184,9 @@ export default function CallScreen({ route, navigation }) {
       ),
       onPanResponderRelease: (e, gestureState) => {
         pipPan.flattenOffset();
+
+        const velocityX = gestureState.vx || 0;
+        const velocityY = gestureState.vy || 0;
 
         // Calculate snap positions
         // PiP is 110px wide, 155px tall. Default position was right: 16
@@ -179,7 +198,8 @@ export default function CallScreen({ route, navigation }) {
         const minY = -100 + insets.top; // Relative to its original top:100 start
         const maxY = screenHeight - pipHeight - 200 - insets.bottom;
 
-        let finalY = pipPan.y._value;
+        let projectedY = panValue.current.y + velocityY * 150;
+        let finalY = projectedY;
         if (finalY < minY) finalY = minY;
         if (finalY > maxY) finalY = maxY;
 
@@ -189,15 +209,24 @@ export default function CallScreen({ route, navigation }) {
         const leftX = -(screenWidth - pipWidth - margin * 2);
         const rightX = 0;
 
-        const isCloserToLeft = pipPan.x._value < leftX / 2;
+        let projectedX = panValue.current.x + velocityX * 150;
+        const isCloserToLeft = projectedX < leftX / 2;
         const finalX = isCloserToLeft ? leftX : rightX;
 
-        Animated.spring(pipPan, {
-          toValue: { x: finalX, y: finalY },
-          friction: 7,
-          tension: 50,
-          useNativeDriver: false,
-        }).start();
+        Animated.parallel([
+          Animated.spring(pipPan, {
+            toValue: { x: finalX, y: finalY },
+            damping: 15,
+            stiffness: 140,
+            mass: 0.8,
+            useNativeDriver: false,
+          }),
+          Animated.spring(pipScale, {
+            toValue: 1,
+            friction: 7,
+            useNativeDriver: false,
+          }),
+        ]).start();
       },
     }),
   ).current;
@@ -386,28 +415,6 @@ export default function CallScreen({ route, navigation }) {
     return () => pulse.stop();
   }, []);
 
-  // ─── PiP Glow Animation ────────────────────────────────────────────────────
-  useEffect(() => {
-    if (localStream && callState === CALL_MANAGER_STATES.CONNECTED) {
-      const glow = Animated.loop(
-        Animated.sequence([
-          Animated.timing(glowAnim, {
-            toValue: 1,
-            duration: 2000,
-            useNativeDriver: false,
-          }),
-          Animated.timing(glowAnim, {
-            toValue: 0,
-            duration: 2000,
-            useNativeDriver: false,
-          }),
-        ]),
-      );
-      glow.start();
-      return () => glow.stop();
-    }
-  }, [localStream, callState]);
-
   // ─── Audio-Only Waveform Animation ──────────────────────────────────────────
   useEffect(() => {
     if (isAudioOnly && callState === CALL_MANAGER_STATES.CONNECTED) {
@@ -530,7 +537,13 @@ export default function CallScreen({ route, navigation }) {
       duration: 250,
       useNativeDriver: true,
     }).start();
-  }, [controlsVisible, overlayAnim]);
+    // ★ Animate PIP opacity separately (JS-driven, matching PIP drag driver)
+    Animated.timing(pipOpacity, {
+      toValue,
+      duration: 250,
+      useNativeDriver: false,
+    }).start();
+  }, [controlsVisible, overlayAnim, pipOpacity]);
 
   // ─── Formatters ─────────────────────────────────────────────────────────────
   const formatDuration = (s) => {
@@ -856,26 +869,17 @@ export default function CallScreen({ route, navigation }) {
           style={[
             styles.pipWrapper,
             {
-              opacity: overlayAnim,
-              transform: [{ translateX: pipPan.x }, { translateY: pipPan.y }],
+              opacity: pipOpacity,
+              transform: [
+                { translateX: pipPan.x },
+                { translateY: pipPan.y },
+                { scale: pipScale },
+              ],
             },
           ]}
-          pointerEvents={controlsVisible ? "auto" : "none"}
+          pointerEvents="auto"
         >
-          <Animated.View
-            style={[
-              styles.localPreview,
-              {
-                borderColor: glowAnim.interpolate({
-                  inputRange: [0, 1],
-                  outputRange: [
-                    "rgba(255, 255, 255, 0.15)",
-                    "rgba(255, 255, 255, 0.4)",
-                  ],
-                }),
-              },
-            ]}
-          >
+          <Animated.View style={styles.localPreview}>
             <RTCView
               key={`local-${localStreamVersion.current}`}
               streamURL={localStream.toURL()}
@@ -1167,12 +1171,6 @@ const styles = StyleSheet.create({
     height: 155,
     borderRadius: 16,
     overflow: "hidden",
-    borderWidth: 2,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8,
   },
   localVideo: {
     width: "100%",

@@ -66,6 +66,7 @@
       ],
       "@react-native-firebase/app",
       "@react-native-firebase/messaging",
+      "@config-plugins/react-native-callkeep",
       "./plugins/withCallNotifications",
       [
         "expo-notifications",

@@ -314,85 +314,47 @@ async function unregisterTokenFromServer() {
 // ─── Call Notification ID (for cancellation) ───────────────────────────────
 const CALL_NOTIFICATION_ID = "incoming-call";
 
-// ─── Display Full-Screen Incoming Call Notification ─────────────────────────
 async function displayCallNotification(data) {
-  if (!notifee) return;
-
   const callerName = data.callerName || "Unknown";
   const callType = data.callType || "video";
-  const isVoice = callType === "voice";
+  const hasVideo = callType === "video";
+  const callUUID = data.callId || "unknown-call-id";
 
   try {
-    await notifee.displayNotification({
-      id: CALL_NOTIFICATION_ID,
-      title: isVoice ? "Incoming Voice Call" : "Incoming Video Call",
-      body: callerName,
-      data,
-      android: {
-        channelId: CHANNELS.CALLS,
-        category: AndroidCategory?.CALL,
-        importance: AndroidImportance.MAX,
-        visibility: AndroidVisibility.PUBLIC,
-        smallIcon: NOTIF_SMALL_ICON,
-        color: "#6C63FF",
-        ongoing: true,
-        autoCancel: false,
-        // ★ KEY: asForegroundService ensures the notification displays
-        // even when the app is killed/force-stopped (like WhatsApp calls)
-        asForegroundService: true,
-        // ★ CRITICAL FIX: Android 14+ requires foregroundServiceType for
-        // full-screen intents from foreground services. Without PHONE_CALL,
-        // the system silently downgrades to a heads-up notification.
-        foregroundServiceType: AndroidForegroundServiceType
-          ? AndroidForegroundServiceType.PHONE_CALL
-          : undefined,
-        foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
-        vibrationPattern: [300, 500, 300, 500, 300, 500, 300, 500],
-        // ★ Sound + loop for continuous ringtone like a real phone call
-        sound: "default",
-        loopSound: true,
-        lights: ["#FF4444", 300, 600],
-        // ★ Full-screen intent — shows IncomingCallScreen over lock screen
-        fullScreenAction: {
-          id: "default",
-          mainComponent: "incoming-call-screen",
-        },
-        // ★ Tap notification body → open incoming call screen
-        pressAction: {
-          id: "default",
-          mainComponent: "incoming-call-screen",
-        },
-        actions: [
-          {
-            title: "Accept",
-            pressAction: {
-              id: "accept_call",
-              mainComponent: "incoming-call-screen",
-            },
-          },
-          {
-            title: "Decline",
-            pressAction: { id: "decline_call" },
-          },
-        ],
-      },
-    });
-    console.log(`📞 Displayed call notification: ${callerName} (${callType})`);
+    const RNCallKeep = require("react-native-callkeep").default;
+    // Native incoming call UI (ConnectionService)
+    RNCallKeep.displayIncomingCall(
+      callUUID,
+      callerName, // Handle
+      callerName, // Localized caller name
+      "generic", // Handle type
+      hasVideo,
+    );
+    console.log(
+      `📞 Displayed call notification via CallKeep: ${callerName} (${callType})`,
+    );
   } catch (err) {
-    console.error("Call notification display error:", err);
+    console.error("CallKeep display error:", err);
   }
 }
 
 // ─── Cancel Call Notification ───────────────────────────────────────────────
 async function cancelCallNotification() {
-  if (!notifee) return;
   try {
-    if (Platform.OS === "android") {
-      try {
-        await notifee.stopForegroundService();
-      } catch {}
+    // Try to cancel CallKeep UI
+    try {
+      const RNCallKeep = require("react-native-callkeep").default;
+      RNCallKeep.endAllCalls();
+    } catch (e) {}
+
+    if (notifee) {
+      if (Platform.OS === "android") {
+        try {
+          await notifee.stopForegroundService();
+        } catch {}
+      }
+      await notifee.cancelNotification(CALL_NOTIFICATION_ID);
     }
-    await notifee.cancelNotification(CALL_NOTIFICATION_ID);
     console.log("⏹️  Cancelled call notification and foreground service");
   } catch (err) {
     console.error("Failed to cancel call notification:", err);
@@ -681,6 +643,37 @@ async function initializeNotifications(navigationRef) {
       }
     }
   });
+
+  // ─── CallKeep Native Event Handlers ─────────────────────────────────────
+  try {
+    const RNCallKeep = require("react-native-callkeep").default;
+    RNCallKeep.addEventListener("answerCall", ({ callUUID }) => {
+      console.log(`📞 CallKeep User Answered: ${callUUID}`);
+      cancelCallNotification();
+      // Bring app to foreground
+      RNCallKeep.backToForeground();
+      // We only have the callUUID, but CallScreen can fetch the rest / negotiate
+      // or join using just the callId via socket auto-sync if we pass it.
+      handleNotificationNavigation(
+        { callId: callUUID, type: "call", acceptFromNotification: true },
+        navigationRef,
+      );
+    });
+
+    RNCallKeep.addEventListener("endCall", ({ callUUID }) => {
+      console.log(`📞 CallKeep User Declined/Ended: ${callUUID}`);
+      cancelCallNotification();
+      if (callUUID) {
+        const apiClient = require("./api").default;
+        const { endpoints } = require("../config/api");
+        apiClient
+          .post(endpoints.calls.reject, { callId: callUUID })
+          .catch(() => {});
+      }
+    });
+  } catch (err) {
+    console.warn("CallKeep event binding error:", err);
+  }
 
   // Notifee tap/action handler
   if (notifee && NotifeeEventType) {
