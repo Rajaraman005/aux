@@ -88,8 +88,13 @@ if (Platform.OS !== "web") {
     const messaging = require("@react-native-firebase/messaging").default;
     const notifeeModule = require("@notifee/react-native");
     const notifee = notifeeModule.default;
-    const { AndroidImportance, AndroidStyle, AndroidVisibility, AndroidCategory } =
-      notifeeModule;
+    const {
+      AndroidImportance,
+      AndroidStyle,
+      AndroidVisibility,
+      AndroidCategory,
+      AndroidForegroundServiceType,
+    } = notifeeModule;
 
     // ─── Notification Channel IDs (must match notifications.js) ───────────
     const CHANNELS = {
@@ -146,7 +151,16 @@ if (Platform.OS !== "web") {
       await ensureChannels();
 
       if (data.type === "call") {
-        // ★ Cancel any auto-displayed notification from notification+data push
+        // ★ Cancel any previously displayed notification (from duplicate FCM pushes
+        // or auto-displayed notification+data push) to prevent conflicts.
+        // The server sends TWO pushes for reliability — only the last one should
+        // remain as the active full-screen call notification.
+        try {
+          await notifee.stopForegroundService();
+        } catch {}
+        try {
+          await notifee.cancelNotification(CALL_NOTIFICATION_ID);
+        } catch {}
         try {
           await notifee.cancelAllNotifications();
         } catch {}
@@ -170,7 +184,12 @@ if (Platform.OS !== "web") {
             color: "#6C63FF",
             ongoing: true,
             autoCancel: false,
+            // ★ Foreground service keeps notification alive when app is killed
             asForegroundService: true,
+            // ★ CRITICAL FIX: Android 14+ requires foregroundServiceType for
+            // full-screen intents from foreground services. Without PHONE_CALL,
+            // the system silently downgrades to a heads-up notification.
+            foregroundServiceType: AndroidForegroundServiceType.PHONE_CALL,
             foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
             vibrationPattern: [300, 500, 300, 500, 300, 500, 300, 500],
             sound: "default",
@@ -188,14 +207,14 @@ if (Platform.OS !== "web") {
             },
             actions: [
               {
-                title: "✅ Accept",
+                title: "Accept",
                 pressAction: {
                   id: "accept_call",
                   mainComponent: "incoming-call-screen",
                 },
               },
               {
-                title: "❌ Decline",
+                title: "Decline",
                 pressAction: { id: "decline_call" },
               },
             ],

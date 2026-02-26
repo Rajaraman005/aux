@@ -16,6 +16,7 @@ let AndroidVisibility = null;
 let AndroidCategory = null;
 let AndroidStyle = null;
 let NotifeeEventType = null;
+let AndroidForegroundServiceType = null;
 let isNativeAvailable = false;
 
 function loadNativeModules() {
@@ -34,6 +35,7 @@ function loadNativeModules() {
     AndroidCategory = notifeeModule.AndroidCategory;
     AndroidStyle = notifeeModule.AndroidStyle;
     NotifeeEventType = notifeeModule.EventType;
+    AndroidForegroundServiceType = notifeeModule.AndroidForegroundServiceType;
     isNativeAvailable = true;
     console.log("✅ Native push modules loaded (FCM + Notifee)");
   } catch (err) {
@@ -89,8 +91,7 @@ async function requestNotificationPermission() {
           // Notifee provides getNotificationSettings which includes
           // android.alarm (USE_FULL_SCREEN_INTENT on 14+)
           const notifSettings = await notifee.getNotificationSettings();
-          const canFullScreen =
-            notifSettings?.android?.alarm === 1; // 1 = ENABLED
+          const canFullScreen = notifSettings?.android?.alarm === 1; // 1 = ENABLED
 
           if (!canFullScreen) {
             console.log(
@@ -339,6 +340,12 @@ async function displayCallNotification(data) {
         // ★ KEY: asForegroundService ensures the notification displays
         // even when the app is killed/force-stopped (like WhatsApp calls)
         asForegroundService: true,
+        // ★ CRITICAL FIX: Android 14+ requires foregroundServiceType for
+        // full-screen intents from foreground services. Without PHONE_CALL,
+        // the system silently downgrades to a heads-up notification.
+        foregroundServiceType: AndroidForegroundServiceType
+          ? AndroidForegroundServiceType.PHONE_CALL
+          : undefined,
         foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
         vibrationPattern: [300, 500, 300, 500, 300, 500, 300, 500],
         // ★ Sound + loop for continuous ringtone like a real phone call
@@ -357,14 +364,14 @@ async function displayCallNotification(data) {
         },
         actions: [
           {
-            title: "✅ Accept",
+            title: "Accept",
             pressAction: {
               id: "accept_call",
               mainComponent: "incoming-call-screen",
             },
           },
           {
-            title: "❌ Decline",
+            title: "Decline",
             pressAction: { id: "decline_call" },
           },
         ],
@@ -373,6 +380,22 @@ async function displayCallNotification(data) {
     console.log(`📞 Displayed call notification: ${callerName} (${callType})`);
   } catch (err) {
     console.error("Call notification display error:", err);
+  }
+}
+
+// ─── Cancel Call Notification ───────────────────────────────────────────────
+async function cancelCallNotification() {
+  if (!notifee) return;
+  try {
+    if (Platform.OS === "android") {
+      try {
+        await notifee.stopForegroundService();
+      } catch {}
+    }
+    await notifee.cancelNotification(CALL_NOTIFICATION_ID);
+    console.log("⏹️  Cancelled call notification and foreground service");
+  } catch (err) {
+    console.error("Failed to cancel call notification:", err);
   }
 }
 
@@ -438,14 +461,7 @@ async function displayMessageNotification(data) {
   }
 }
 
-// ─── Cancel Call Notification ───────────────────────────────────────────────
-async function cancelCallNotification() {
-  if (!notifee) return;
-  try {
-    await notifee.cancelNotification(CALL_NOTIFICATION_ID);
-  } catch {}
-}
-
+// (Duplicate removed)
 // ─── Display Foreground Notification (via Notifee) ──────────────────────────
 async function displayForegroundNotification(remoteMessage) {
   if (!notifee) return;
@@ -628,8 +644,19 @@ async function initializeNotifications(navigationRef) {
     const notification = remoteMessage.notification || {};
 
     if (data.type === "call") {
-      // Show full-screen call notification even in foreground
-      await displayCallNotification(data);
+      // 🚨 CRITICAL FIX: Do NOT trigger Notifee's full-screen ringtone intent
+      // if the app is in the foreground. SignalingContext.js already handles
+      // the incoming call UI and uses SoundService for the ringtone.
+      // Triggering Notifee here causes an OS audio focus conflict that mutes
+      // the ringtone after 1 second.
+      //
+      // ★ ADDITIONALLY: Cancel any auto-displayed notification from the
+      // notification+data push. Android auto-displays it BEFORE this handler
+      // runs, and its sound steals audio focus from our expo-av ringtone.
+      cancelCallNotification();
+      console.log(
+        "📨 Foreground FCM message: call (cancelled auto-notification, delegating to WebSocket/SignalingContext)",
+      );
     } else if (
       data.type === "message" &&
       _activeConversationId &&

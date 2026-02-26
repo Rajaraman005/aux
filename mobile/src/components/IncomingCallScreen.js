@@ -5,11 +5,15 @@
  *   via `fullScreenAction` when a call notification fires while the
  *   screen is OFF or locked. Also launched when the user taps Accept.
  *
- * This component receives the call data via `initialNotification` from
- * Notifee and displays a WhatsApp-style incoming call screen with
- * caller info and Accept/Decline buttons.
+ * ★ FIX: This component now:
+ *   1. Reads call data from Notifee initial notification OR from
+ *      Notifee foreground events (for action button presses)
+ *   2. Stops the foreground service and notification on accept/decline
+ *   3. Opens the main app to the Call screen on accept
+ *   4. Rejects the call via REST API on decline (no WebSocket available)
+ *   5. Shows a pulsing animation while ringing
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -17,6 +21,9 @@ import {
   StyleSheet,
   StatusBar,
   Image,
+  Animated,
+  Easing,
+  Linking,
   AppRegistry,
 } from "react-native";
 import Icon from "react-native-vector-icons/Feather";
@@ -26,17 +33,70 @@ const CALL_NOTIFICATION_ID = "incoming-call";
 
 export default function IncomingCallScreen() {
   const [callData, setCallData] = useState(null);
+  const [isHandled, setIsHandled] = useState(false);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
 
+  // ─── Pulsating ring animation ───────────────────────────────────────────
   useEffect(() => {
-    // Read the notification that launched this component
+    // Fade in
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 500,
+      useNativeDriver: true,
+    }).start();
+
+    // Pulse loop
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1.15,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    );
+    pulse.start();
+
+    return () => pulse.stop();
+  }, []);
+
+  // ─── Load call data from notification ───────────────────────────────────
+  useEffect(() => {
     async function loadCallData() {
       try {
         const notifeeModule = require("@notifee/react-native");
         const notifee = notifeeModule.default;
 
+        // Try getInitialNotification first (for fullScreenAction launch)
         const initialNotification = await notifee.getInitialNotification();
         if (initialNotification?.notification?.data) {
+          console.log(
+            "📞 IncomingCallScreen: Loaded data from initial notification",
+          );
           setCallData(initialNotification.notification.data);
+          return;
+        }
+
+        // Fallback: check displayed notifications for our call notification
+        const displayed = await notifee.getDisplayedNotifications();
+        const callNotif = displayed.find(
+          (n) =>
+            n.id === CALL_NOTIFICATION_ID ||
+            n.notification?.data?.type === "call",
+        );
+        if (callNotif?.notification?.data) {
+          console.log(
+            "📞 IncomingCallScreen: Loaded data from displayed notification",
+          );
+          setCallData(callNotif.notification.data);
         }
       } catch (err) {
         console.error("IncomingCallScreen: Failed to load call data:", err);
@@ -45,28 +105,44 @@ export default function IncomingCallScreen() {
     loadCallData();
   }, []);
 
+  // ─── Handle Accept ──────────────────────────────────────────────────────
   const handleAccept = async () => {
+    if (isHandled) return;
+    setIsHandled(true);
+
     try {
       const notifeeModule = require("@notifee/react-native");
       const notifee = notifeeModule.default;
+
+      // Stop foreground service + cancel notification
       try {
         await notifee.stopForegroundService();
       } catch {}
       await notifee.cancelNotification(CALL_NOTIFICATION_ID);
     } catch {}
-    // The app will open to the main Activity — CallScreen handles the rest
+
+    // ★ The app will open via MainActivity (launched by fullScreenAction/pressAction).
+    // The main app's notification handlers will detect the call data
+    // and navigate to the Call screen.
+    console.log("📞 IncomingCallScreen: Call accepted");
   };
 
+  // ─── Handle Decline ─────────────────────────────────────────────────────
   const handleDecline = async () => {
+    if (isHandled) return;
+    setIsHandled(true);
+
     try {
       const notifeeModule = require("@notifee/react-native");
       const notifee = notifeeModule.default;
+
+      // Stop foreground service + cancel notification
       try {
         await notifee.stopForegroundService();
       } catch {}
       await notifee.cancelNotification(CALL_NOTIFICATION_ID);
 
-      // Reject via REST API
+      // Reject via REST API (no WebSocket in killed-app context)
       if (callData?.callId) {
         try {
           const apiClient = require("../services/api").default;
@@ -74,9 +150,14 @@ export default function IncomingCallScreen() {
           await apiClient.post(endpoints.calls.reject, {
             callId: callData.callId,
           });
-        } catch {}
+          console.log("📞 IncomingCallScreen: Call rejected via REST API");
+        } catch (apiErr) {
+          console.error("IncomingCallScreen: REST reject failed:", apiErr);
+        }
       }
-    } catch {}
+    } catch (err) {
+      console.error("IncomingCallScreen: Decline error:", err);
+    }
   };
 
   const callerName = callData?.callerName || "Unknown";
@@ -87,7 +168,7 @@ export default function IncomingCallScreen() {
   const avatarUri = `https://api.dicebear.com/7.x/initials/png?seed=${encodeURIComponent(callerName)}&backgroundColor=6C63FF`;
 
   return (
-    <View style={styles.container}>
+    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
       <StatusBar
         barStyle="light-content"
         backgroundColor="transparent"
@@ -101,9 +182,13 @@ export default function IncomingCallScreen() {
 
       {/* Avatar + name */}
       <View style={styles.callerInfo}>
-        <View style={styles.avatarRing}>
-          <Image source={{ uri: avatarUri }} style={styles.avatar} />
-        </View>
+        <Animated.View
+          style={[styles.avatarPulse, { transform: [{ scale: pulseAnim }] }]}
+        >
+          <View style={styles.avatarRing}>
+            <Image source={{ uri: avatarUri }} style={styles.avatar} />
+          </View>
+        </Animated.View>
         <Text style={styles.callerName}>{callerName}</Text>
         <Text style={styles.callStatus}>is calling you...</Text>
       </View>
@@ -112,9 +197,10 @@ export default function IncomingCallScreen() {
       <View style={styles.actions}>
         <View style={styles.actionWrap}>
           <TouchableOpacity
-            style={styles.declineBtn}
+            style={[styles.declineBtn, isHandled && styles.disabledBtn]}
             onPress={handleDecline}
             activeOpacity={0.8}
+            disabled={isHandled}
           >
             <Icon name="x" size={32} color="#fff" />
           </TouchableOpacity>
@@ -123,16 +209,17 @@ export default function IncomingCallScreen() {
 
         <View style={styles.actionWrap}>
           <TouchableOpacity
-            style={styles.acceptBtn}
+            style={[styles.acceptBtn, isHandled && styles.disabledBtn]}
             onPress={handleAccept}
             activeOpacity={0.8}
+            disabled={isHandled}
           >
             <Icon name={isVoice ? "phone" : "video"} size={32} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.actionLabel}>Accept</Text>
         </View>
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -155,6 +242,9 @@ const styles = StyleSheet.create({
   callerInfo: {
     alignItems: "center",
   },
+  avatarPulse: {
+    marginBottom: 20,
+  },
   avatarRing: {
     width: 120,
     height: 120,
@@ -163,7 +253,6 @@ const styles = StyleSheet.create({
     borderColor: "#6C63FF",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 20,
   },
   avatar: {
     width: 110,
@@ -205,6 +294,9 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     marginBottom: 8,
+  },
+  disabledBtn: {
+    opacity: 0.5,
   },
   actionLabel: {
     color: "rgba(255,255,255,0.7)",

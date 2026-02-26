@@ -132,6 +132,7 @@ class WebRTCEngine {
 
     // ★ Cleanup guard — prevents recursive re-entry
     this._isCleaningUp = false;
+    this._speakerOn = false;
   }
 
   // ─── State Machine ─────────────────────────────────────────────────────────
@@ -564,6 +565,21 @@ class WebRTCEngine {
     if (videoTrack && typeof videoTrack._switchCamera === "function") {
       videoTrack._switchCamera();
     }
+  }
+
+  /**
+   * Toggle speakerphone on/off via InCallManager.
+   * @returns {boolean} New speaker state (true = speaker on)
+   */
+  toggleSpeaker() {
+    if (!InCallManager) return false;
+    this._speakerOn = !this._speakerOn;
+    try {
+      InCallManager.setForceSpeakerphoneOn(this._speakerOn);
+    } catch (e) {
+      console.warn("Failed to toggle speaker:", e.message);
+    }
+    return this._speakerOn;
   }
 
   // ─── Audio/Video Mode Switching ────────────────────────────────────────────

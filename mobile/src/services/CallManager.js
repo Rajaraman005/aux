@@ -22,6 +22,11 @@ import signalingClient from "./socket";
 import webrtcEngine from "./webrtc";
 import networkMonitor from "./networkMonitor";
 import audioEngine from "./audioEngine";
+import SoundService from "./sounds";
+import {
+  displayMessageNotification,
+  cancelCallNotification,
+} from "./notifications";
 import crashLogger, { CATEGORIES } from "./CrashLogger";
 
 // ─── Deterministic State Machine ────────────────────────────────────────────
@@ -232,6 +237,15 @@ class CallManager {
     this._startAppStateMonitor();
     this._startConnectingTimeout();
 
+    // Cancel the ringing notification
+    cancelCallNotification();
+
+    // ★ FIX: Stop ringtone BEFORE WebRTC init.
+    // InCallManager.start() steals audio focus from expo-av.
+    // If the ringtone is still playing when InCallManager starts,
+    // it gets killed mid-playback (the "one beep" bug).
+    SoundService.stopRingtone();
+
     // Accept via signaling
     signalingClient.acceptCall(callData.callId);
 
@@ -244,6 +258,7 @@ class CallManager {
 
   // ─── Reject Incoming Call ───────────────────────────────────────────────
   rejectIncomingCall(callId) {
+    cancelCallNotification();
     signalingClient.rejectCall(callId);
   }
 
@@ -260,6 +275,11 @@ class CallManager {
     ) {
       return;
     }
+
+    // Safety net: always cancel ringing if present
+    cancelCallNotification();
+    // ★ FIX: Always stop ringtone on endCall as safety net
+    SoundService.stopRingtone();
 
     crashLogger.log(
       CATEGORIES.CALL_ENDED,
@@ -481,6 +501,7 @@ class CallManager {
           this._session.callType = newMode;
           if (newMode === "voice") {
             webrtcEngine.switchToAudioOnly();
+            networkMonitor.setVideoEnabled(false); // Added this line
             this._emit("modeSwitch", {
               mode: "audio_only",
               reason: "remote_switched",
@@ -490,10 +511,41 @@ class CallManager {
             // glare — the remote peer will send a renegotiation offer with
             // their new video track, so we just need to enable our own camera.
             webrtcEngine.enableLocalVideo();
+            networkMonitor.setVideoEnabled(true); // Added this line
             this._emit("modeSwitch", {
               mode: "video",
               reason: "remote_switched",
             });
+          }
+        }
+      }),
+    );
+
+    // ★ Remote peer requests video switch
+    this._pushUnsub(
+      signalingClient.on("call-mode-request", (msg) => {
+        if (msg.callId === callId() && this._session && msg.mode === "video") {
+          this._emit("videoSwitchRequest", {
+            from: msg.fromName || "Remote user", // Changed from fromUserId to fromName
+          });
+        }
+      }),
+    );
+
+    // ★ Remote peer responds to video switch request
+    this._pushUnsub(
+      signalingClient.on("call-mode-response", (msg) => {
+        if (msg.callId === callId() && this._session) {
+          if (msg.accepted) {
+            this._session.callType = "video";
+            networkMonitor.setVideoEnabled(true);
+            webrtcEngine.switchToVideoMode();
+            this._emit("modeSwitch", {
+              mode: "video",
+              reason: "request_accepted",
+            });
+          } else {
+            this._emit("videoSwitchDeclined", { from: msg.fromName }); // Changed from fromUserId to fromName
           }
         }
       }),
@@ -634,7 +686,7 @@ class CallManager {
         isCaller,
         videoEnabled,
       );
-      networkMonitor.start(this._session.callId);
+      networkMonitor.start(this._session.callId, videoEnabled); // Changed this line
 
       if (isCaller) {
         await webrtcEngine.createOffer();
@@ -688,6 +740,10 @@ class CallManager {
     return webrtcEngine.switchCamera();
   }
 
+  toggleSpeaker() {
+    return webrtcEngine.toggleSpeaker();
+  }
+
   /**
    * Switch call mode mid-call (voice↔video).
    * @param {"voice"|"video"} newType
@@ -696,19 +752,35 @@ class CallManager {
     if (!this._session || !this.isActive) return false;
     if (this._session.callType === newType) return false;
 
-    this._session.callType = newType;
-
     if (newType === "voice") {
+      this._session.callType = "voice";
       webrtcEngine.switchToAudioOnly();
+      networkMonitor.setVideoEnabled(false); // Added this line
       this._emit("modeSwitch", { mode: "audio_only", reason: "user_switched" });
+      signalingClient.sendCallModeSwitch(this._session.callId, newType);
+      return true;
     } else {
-      webrtcEngine.switchToVideoMode();
-      this._emit("modeSwitch", { mode: "video", reason: "user_switched" });
+      // Request video switch - don't perform switch until accepted
+      signalingClient.sendCallModeRequest(this._session.callId, newType);
+      return false;
     }
+  }
 
-    // Notify remote peer via signaling
-    signalingClient.sendCallModeSwitch(this._session.callId, newType);
-    return true;
+  /**
+   * Respond to an incoming video switch request.
+   * @param {boolean} accepted
+   */
+  respondToVideoRequest(accepted) {
+    if (!this._session || !this.isActive) return;
+
+    signalingClient.sendCallModeResponse(this._session.callId, accepted);
+
+    if (accepted) {
+      this._session.callType = "video";
+      networkMonitor.setVideoEnabled(true);
+      webrtcEngine.enableLocalVideo();
+      this._emit("modeSwitch", { mode: "video", reason: "request_accepted" });
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

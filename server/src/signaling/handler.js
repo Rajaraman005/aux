@@ -182,6 +182,12 @@ function initializeSignaling(wss) {
           case "call-mode-switch":
             await handleCallModeSwitch(userId, message);
             break;
+          case "call-mode-request":
+            await handleCallModeRequest(userId, message);
+            break;
+          case "call-mode-response":
+            await handleCallModeResponse(userId, message);
+            break;
           case "call-rejoin":
             await handleCallRejoin(userId, message, ws);
             break;
@@ -560,6 +566,36 @@ async function handleCallModeSwitch(userId, message) {
     type: "call-mode-switch",
     callId,
     mode,
+    fromUserId: userId,
+  });
+}
+
+// --- Call Mode Request (Consent Flow) ---
+async function handleCallModeRequest(userId, message) {
+  const { callId, mode } = message;
+  const call = activeCalls.get(callId);
+  if (!call || call.state === "ended") return;
+
+  const targetId = call.callerId === userId ? call.calleeId : call.callerId;
+  await presence.sendToUser(targetId, {
+    type: "call-mode-request",
+    callId,
+    mode,
+    fromUserId: userId,
+  });
+}
+
+// --- Call Mode Response (Consent Flow) ---
+async function handleCallModeResponse(userId, message) {
+  const { callId, accepted } = message;
+  const call = activeCalls.get(callId);
+  if (!call || call.state === "ended") return;
+
+  const targetId = call.callerId === userId ? call.calleeId : call.callerId;
+  await presence.sendToUser(targetId, {
+    type: "call-mode-response",
+    callId,
+    accepted,
     fromUserId: userId,
   });
 }

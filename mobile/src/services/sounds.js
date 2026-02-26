@@ -1,13 +1,3 @@
-/**
- * Sound Service — Manages ringtone and notification sounds.
- * Uses expo-av for audio playback.
- *
- * Usage:
- *   import SoundService from '../services/sounds';
- *   await SoundService.playRingtone();   // loops until stopped
- *   SoundService.stopRingtone();
- *   await SoundService.playMessage();    // plays once
- */
 import { Audio } from "expo-av";
 
 // Pre-load sound references
@@ -22,7 +12,7 @@ class SoundService {
   }
 
   /**
-   * Configure audio mode for playback (call once at app start).
+   * Configure audio mode for general playback (call once at app start).
    */
   async init() {
     if (this._initialized) return;
@@ -30,8 +20,9 @@ class SoundService {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
+        staysActiveInBackground: false,
+        // ★ FIX: false prevents notification sounds from ducking our audio
+        shouldDuckAndroid: false,
       });
       this._initialized = true;
     } catch (err) {
@@ -39,35 +30,61 @@ class SoundService {
     }
   }
 
-  /**
-   * Play the ringtone (loops until stopRingtone is called).
-   */
+  async _setRingtoneMode() {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: true,
+        shouldDuckAndroid: false,
+      });
+    } catch (err) {
+      console.warn("SoundService _setRingtoneMode error:", err);
+    }
+  }
+
+  async _restoreAudioMode() {
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        shouldDuckAndroid: false,
+      });
+    } catch (err) {
+      console.warn("SoundService _restoreAudioMode error:", err);
+    }
+  }
+
   async playRingtone() {
     try {
       await this.init();
       // Stop any existing ringtone first
       await this.stopRingtone();
 
-      const { sound } = await Audio.Sound.createAsync(RINGTONE_ASSET, {
-        isLooping: true,
-        volume: 1.0,
-        shouldPlay: true,
-      });
+      // ★ Set ringtone-specific audio mode BEFORE creating the sound
+      await this._setRingtoneMode();
+
+      const { sound } = await Audio.Sound.createAsync(RINGTONE_ASSET);
       this._ringtone = sound;
+      await sound.setIsLoopingAsync(true);
+      await sound.setVolumeAsync(1.0);
+      await sound.playAsync();
+      console.log("🔔 SoundService: Ringtone started (looping)");
     } catch (err) {
       console.warn("SoundService playRingtone error:", err);
     }
   }
 
-  /**
-   * Stop the ringtone.
-   */
   async stopRingtone() {
     try {
       if (this._ringtone) {
         await this._ringtone.stopAsync();
         await this._ringtone.unloadAsync();
         this._ringtone = null;
+        console.log("🔕 SoundService: Ringtone stopped");
+        // ★ Restore normal audio mode after stopping ringtone
+        await this._restoreAudioMode();
       }
     } catch (err) {
       console.warn("SoundService stopRingtone error:", err);

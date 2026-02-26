@@ -64,6 +64,14 @@ export function SignalingProvider({ children }) {
         return;
       }
       setIncomingCall({ ...data, callType: data.callType || "video" });
+
+      // ★ FIX: Cancel any auto-displayed FCM notification BEFORE playing ringtone.
+      // The server ALWAYS sends a notification+data push (for killed-app fallback).
+      // When the app is foreground, Android auto-displays it with its own sound,
+      // which steals audio focus from our expo-av ringtone — causing the
+      // "one beep then silent" bug. Cancel it so our ringtone plays uninterrupted.
+      cancelCallNotification();
+
       SoundService.playRingtone().catch(() => {});
     });
 

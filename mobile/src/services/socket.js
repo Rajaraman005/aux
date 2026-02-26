@@ -363,6 +363,14 @@ class SignalingClient {
     return this.send({ type: "call-mode-switch", callId, mode });
   }
 
+  sendCallModeRequest(callId, mode) {
+    return this.send({ type: "call-mode-request", callId, mode });
+  }
+
+  sendCallModeResponse(callId, accepted) {
+    return this.send({ type: "call-mode-response", callId, accepted });
+  }
+
   // ─── Chat Helpers ───────────────────────────────────────────────────────────
   sendChatMessage(conversationId, content, tempId, media = null) {
     return this.send({

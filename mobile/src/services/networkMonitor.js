@@ -85,18 +85,22 @@ class NetworkMonitor {
     this.metricsInterval = null;
     this.modeSwitchCount = 0;
 
-    // ★ Hysteresis counters
     this._downgradeCounter = 0;
     this._upgradeCounter = 0;
     this._startTime = 0;
     this._bandwidthMeasured = false;
+    this.isVideoEnabled = true;
   }
 
-  start(callId) {
+  start(callId, isVideoEnabled = true) {
     this.callId = callId;
+    this.isVideoEnabled = isVideoEnabled;
     this._startTime = Date.now();
     this._bandwidthMeasured = false;
     this._downgradeCounter = 0;
+    this.currentTier = isVideoEnabled
+      ? QUALITY_TIERS.EXCELLENT
+      : QUALITY_TIERS.AUDIO_ONLY;
 
     webrtcEngine.onStats = (stats) => this.processStats(stats);
 
@@ -159,6 +163,14 @@ class NetworkMonitor {
     ) {
       newTier = QUALITY_TIERS.FAIR;
     } else {
+      newTier = QUALITY_TIERS.AUDIO_ONLY;
+    }
+
+    // ★ Cap at AUDIO_ONLY if it's explicitly a voice call
+    if (
+      !this.isVideoEnabled &&
+      newTier.level > QUALITY_TIERS.AUDIO_ONLY.level
+    ) {
       newTier = QUALITY_TIERS.AUDIO_ONLY;
     }
 
@@ -247,8 +259,17 @@ class NetworkMonitor {
       audioBitrate: this.previousStats?.audio?.bitrate || 0,
       videoBitrate: this.previousStats?.video?.bitrate || 0,
       modeSwitches: this.modeSwitchCount,
+      modeSwitches: this.modeSwitchCount,
       tier: this.currentTier.name,
     });
+  }
+
+  setVideoEnabled(isEnabled) {
+    this.isVideoEnabled = isEnabled;
+    if (isEnabled && this.currentTier.level <= QUALITY_TIERS.AUDIO_ONLY.level) {
+      // Reset gracefully so processStats can upgrade
+      this._bandwidthMeasured = false;
+    }
   }
 
   getQualityLevel() {
