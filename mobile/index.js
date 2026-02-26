@@ -277,4 +277,4 @@ if (Platform.OS !== "web") {
 
 // ─── Register the App Component ──────────────────────────────────────────────
 // ★ Must be "main" to match MainActivity.kt getMainComponentName()
-AppRegistry.registerComponent(appConfig.name || "main", () => App);
+AppRegistry.registerComponent("main", () => App);

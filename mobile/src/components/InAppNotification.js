@@ -39,7 +39,6 @@ import Animated, {
   withTiming,
   runOnJS,
   interpolate,
-  Extrapolate,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";

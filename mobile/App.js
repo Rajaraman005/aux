@@ -439,10 +439,10 @@ function RootNavigator() {
             notification: colors.error,
           },
           fonts: {
-            regular: { fontFamily: "System", fontWeight: "400" },
-            medium: { fontFamily: "System", fontWeight: "500" },
-            bold: { fontFamily: "System", fontWeight: "700" },
-            heavy: { fontFamily: "System", fontWeight: "800" },
+            regular: { fontFamily: "sans-serif", fontWeight: "400" },
+            medium: { fontFamily: "sans-serif-medium", fontWeight: "500" },
+            bold: { fontFamily: "sans-serif", fontWeight: "700" },
+            heavy: { fontFamily: "sans-serif", fontWeight: "800" },
           },
         }}
       >
