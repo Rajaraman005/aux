@@ -30,6 +30,10 @@ const {
 // Active calls: callId -> { callerId, calleeId, startedAt, state }
 const activeCalls = new Map();
 
+// ★ Disconnect grace timers: userId -> timeoutId
+// When a user disconnects, we delay call cleanup to allow push-woken reconnects.
+const disconnectTimers = new Map();
+
 // Message rate limiting per connection
 const MESSAGE_RATE_LIMIT = 50; // messages per second
 const rateLimitCounters = new Map(); // ws -> { count, resetAt }
@@ -80,6 +84,16 @@ function initializeSignaling(wss) {
     // ─── Register Presence ──────────────────────────────────────────────
     await presence.userConnected(userId, ws);
     metrics.activeConnections.inc();
+
+    // ★ Cancel any pending disconnect cleanup timer (user reconnected in time)
+    const pendingTimer = disconnectTimers.get(userId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      disconnectTimers.delete(userId);
+      console.log(
+        `✅ ${userName} (${userId}) reconnected — cancelled call cleanup`,
+      );
+    }
 
     console.log(`🟢 ${userName} (${userId}) connected from ${clientIp}`);
 
@@ -226,23 +240,66 @@ function initializeSignaling(wss) {
       clearInterval(heartbeatInterval);
       rateLimitCounters.delete(ws);
 
-      // Clean up any active calls for this user
-      for (const [callId, call] of activeCalls) {
-        if (call.callerId === userId || call.calleeId === userId) {
-          const otherUserId =
-            call.callerId === userId ? call.calleeId : call.callerId;
-          await presence.sendToUser(otherUserId, {
-            type: "call-ended",
-            callId,
-            reason: "peer_disconnected",
-          });
-          await finalizeCall(callId, "peer_disconnected");
-        }
-      }
-
       await presence.userDisconnected(userId);
       metrics.activeConnections.dec();
       console.log(`🔴 ${userName} (${userId}) disconnected`);
+
+      // ★ Check if this user has any active calls
+      let hasActiveCalls = false;
+      for (const [, call] of activeCalls) {
+        if (
+          call.state !== "ended" &&
+          (call.callerId === userId || call.calleeId === userId)
+        ) {
+          hasActiveCalls = true;
+          break;
+        }
+      }
+
+      if (hasActiveCalls) {
+        // ★ GRACE PERIOD: Wait 10 seconds before killing calls.
+        // This allows push-woken users to reconnect via a new WebSocket
+        // before we destroy their pending/active calls.
+        const GRACE_PERIOD_MS = 10000;
+        console.log(
+          `⏳ ${userName} (${userId}) has active calls — waiting ${GRACE_PERIOD_MS / 1000}s before cleanup`,
+        );
+
+        const timer = setTimeout(async () => {
+          disconnectTimers.delete(userId);
+
+          // Check if user reconnected during grace period
+          const isBackOnline = await presence.isOnline(userId);
+          if (isBackOnline) {
+            console.log(
+              `✅ ${userName} (${userId}) is back online — skipping call cleanup`,
+            );
+            return;
+          }
+
+          // User did NOT reconnect — clean up their calls
+          console.log(
+            `❌ ${userName} (${userId}) did not reconnect — cleaning up calls`,
+          );
+          for (const [callId, call] of activeCalls) {
+            if (
+              call.state !== "ended" &&
+              (call.callerId === userId || call.calleeId === userId)
+            ) {
+              const otherUserId =
+                call.callerId === userId ? call.calleeId : call.callerId;
+              await presence.sendToUser(otherUserId, {
+                type: "call-ended",
+                callId,
+                reason: "peer_disconnected",
+              });
+              await finalizeCall(callId, "peer_disconnected");
+            }
+          }
+        }, GRACE_PERIOD_MS);
+
+        disconnectTimers.set(userId, timer);
+      }
     });
 
     ws.on("error", (err) => {
@@ -706,7 +763,12 @@ async function handleChatMessage(userId, userName, message, ws) {
           : media_type === "video"
             ? "Video"
             : "Photo";
-        await sendMessagePush(participantId, userName, pushText, conversationId);
+        await sendMessagePush(
+          participantId,
+          userName,
+          pushText,
+          conversationId,
+        );
       }
     }
   } catch (err) {
