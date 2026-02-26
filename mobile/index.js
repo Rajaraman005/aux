@@ -74,8 +74,6 @@ try {
 
 crashLogger.log(CATEGORIES.APP_START, "index.js loaded — app process starting");
 
-// Removed incoming-call-screen registration since CallKeep uses Android ConnectionService natively
-
 // ─── Background Message Handler (MUST be registered before AppRegistry) ─────
 // This runs in a headless JS context when the app is killed/backgrounded.
 // It MUST be at the entry point level, not inside a React component.
@@ -90,6 +88,7 @@ if (Platform.OS !== "web") {
       AndroidVisibility,
       AndroidCategory,
       AndroidForegroundServiceType,
+      AndroidColor,
     } = notifeeModule;
 
     // ─── Notification Channel IDs (must match notifications.js) ───────────
@@ -112,6 +111,16 @@ if (Platform.OS !== "web") {
           sound: "default",
         });
         await notifee.createChannel({
+          id: CHANNELS.CALLS,
+          name: "Incoming Calls",
+          importance: AndroidImportance.HIGH,
+          vibration: true,
+          vibrationPattern: [500, 200, 500, 200, 500, 200],
+          sound: "default",
+          visibility: AndroidVisibility.PUBLIC,
+          bypassDnd: true,
+        });
+        await notifee.createChannel({
           id: CHANNELS.GENERAL,
           name: "General",
           importance: AndroidImportance.DEFAULT,
@@ -121,29 +130,6 @@ if (Platform.OS !== "web") {
         console.error("Background channel setup error:", err);
       }
     }
-
-    // ─── RNCallKeep Setup ────────────────────────────────────────────────
-    const RNCallKeep = require("react-native-callkeep").default;
-    RNCallKeep.setup({
-      ios: {
-        appName: "Aux",
-      },
-      android: {
-        alertTitle: "Permissions required",
-        alertDescription:
-          "This application needs to access your phone accounts for calling",
-        cancelButton: "Cancel",
-        okButton: "Ok",
-        additionalPermissions: [],
-        foregroundService: {
-          channelId: "calls",
-          channelName: "Calls",
-          notificationTitle: "Aux Call in Progress",
-          notificationIcon: "ic_launcher",
-        },
-      },
-    });
-    RNCallKeep.setAvailable(true);
 
     // ─── FCM Background Message Handler ──────────────────────────────────
     messaging().setBackgroundMessageHandler(async (remoteMessage) => {
@@ -159,8 +145,6 @@ if (Platform.OS !== "web") {
       if (data.type === "call") {
         // ★ Cancel any previously displayed notification (from duplicate FCM pushes
         // or auto-displayed notification+data push) to prevent conflicts.
-        // The server sends TWO pushes for reliability — only the last one should
-        // remain as the active full-screen call notification.
         try {
           await notifee.stopForegroundService();
         } catch {}
@@ -171,27 +155,59 @@ if (Platform.OS !== "web") {
           await notifee.cancelAllNotifications();
         } catch {}
 
-        // Show full-screen WhatsApp-style native call notification using CallKeep
-        const callerName = data.callerName || 'Unknown';
-        const callType = data.callType || 'video';
-        const hasVideo = callType === 'video';
-        
-        // Ensure call ID is valid string for CallKeep
-        const callUUID = data.callId || 'unknown-call-id';
+        // ★ WhatsApp-style full-screen incoming call notification
+        const callerName = data.callerName || "Unknown";
+        const callType = data.callType || "video";
 
-        try {
-          // Native incoming call UI (ConnectionService)
-          RNCallKeep.displayIncomingCall(
-            callUUID,
-            callerName, // Handle (usually number, we'll use name)
-            callerName, // Localized caller name
-            'generic', // Handle type
-            hasVideo
-          );
-        } catch (err) {
-          console.error('Error displaying CallKeep native UI:', err);
-        }
-        console.log(`📞 [index.js] Call notification displayed via CallKeep: `);
+        await notifee.displayNotification({
+          id: CALL_NOTIFICATION_ID,
+          title: "Aux",
+          subtitle: callerName,
+          body: `Incoming ${callType} call`,
+          data: { ...data, type: "call" },
+          android: {
+            channelId: CHANNELS.CALLS,
+            category: AndroidCategory.CALL,
+            importance: AndroidImportance.HIGH,
+            visibility: AndroidVisibility.PUBLIC,
+            smallIcon: NOTIF_SMALL_ICON,
+            color: "#6C63FF",
+            colorized: true,
+            ongoing: true,
+            autoCancel: false,
+            loopSound: true,
+            sound: "default",
+            vibrationPattern: [500, 200, 500, 200, 500, 200],
+            // ★ Show over lock screen as full-screen intent
+            fullScreenAction: {
+              id: "default",
+              launchActivity: "default",
+            },
+            // ★ Keep notification alive as a foreground service
+            asForegroundService: true,
+            foregroundServiceTypes: [AndroidForegroundServiceType.PHONE_CALL],
+            // ★ WhatsApp-style action buttons: Decline (red) | Answer (green)
+            actions: [
+              {
+                title: "Decline",
+                pressAction: { id: "decline_call" },
+                icon: "ic_launcher",
+              },
+              {
+                title: "Answer",
+                pressAction: { id: "accept_call", launchActivity: "default" },
+                icon: "ic_launcher",
+              },
+            ],
+            // ★ Chronometer shows elapsed time since notification appeared
+            showChronometer: false,
+            timestamp: Date.now(),
+            showTimestamp: true,
+          },
+        });
+        console.log(
+          `📞 [index.js] WhatsApp-style call notification displayed: ${callerName} (${callType})`,
+        );
       } else if (data.type === "message") {
         // ★ WhatsApp-style message notification
         const senderName = data.senderName || data.title || "Someone";
@@ -294,8 +310,24 @@ if (Platform.OS !== "web") {
       console.log("📨 [index.js] Notifee background event:", type, actionId);
 
       if (type === EventType.ACTION_PRESS) {
-        if (actionId === "default") {
-          // User tapped notification body
+        if (actionId === "decline_call") {
+          // User declined — stop foreground service and cancel notification
+          try {
+            await notifee.stopForegroundService();
+          } catch {}
+          await notifee.cancelNotification(CALL_NOTIFICATION_ID);
+          // Reject via REST if callId available
+          if (notifData?.callId) {
+            try {
+              const apiClient = require("./src/services/api").default;
+              const { endpoints } = require("./src/config/api");
+              await apiClient.post(endpoints.calls.reject, {
+                callId: notifData.callId,
+              });
+            } catch {}
+          }
+        } else if (actionId === "accept_call" || actionId === "default") {
+          // User accepted or tapped notification — stop service, app will open
           try {
             await notifee.stopForegroundService();
           } catch {}

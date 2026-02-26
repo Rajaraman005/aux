@@ -315,38 +315,79 @@ async function unregisterTokenFromServer() {
 const CALL_NOTIFICATION_ID = "incoming-call";
 
 async function displayCallNotification(data) {
+  if (!notifee) {
+    console.warn("Notifee not available — cannot show call notification");
+    return;
+  }
+
   const callerName = data.callerName || "Unknown";
   const callType = data.callType || "video";
-  const hasVideo = callType === "video";
-  const callUUID = data.callId || "unknown-call-id";
 
   try {
-    const RNCallKeep = require("react-native-callkeep").default;
-    // Native incoming call UI (ConnectionService)
-    RNCallKeep.displayIncomingCall(
-      callUUID,
-      callerName, // Handle
-      callerName, // Localized caller name
-      "generic", // Handle type
-      hasVideo,
-    );
+    // ★ Cancel any existing call notification first
+    try {
+      await notifee.stopForegroundService();
+    } catch {}
+    try {
+      await notifee.cancelNotification(CALL_NOTIFICATION_ID);
+    } catch {}
+
+    // ★ WhatsApp-style full-screen incoming call notification
+    await notifee.displayNotification({
+      id: CALL_NOTIFICATION_ID,
+      title: "Aux",
+      subtitle: callerName,
+      body: `Incoming ${callType} call`,
+      data: { ...data, type: "call" },
+      android: {
+        channelId: CHANNELS.CALLS,
+        category: AndroidCategory.CALL,
+        importance: AndroidImportance.HIGH,
+        visibility: AndroidVisibility.PUBLIC,
+        smallIcon: NOTIF_SMALL_ICON,
+        color: "#6C63FF",
+        colorized: true,
+        ongoing: true,
+        autoCancel: false,
+        loopSound: true,
+        sound: "default",
+        vibrationPattern: [500, 200, 500, 200, 500, 200],
+        // ★ Show over lock screen as full-screen intent
+        fullScreenAction: {
+          id: "default",
+          launchActivity: "default",
+        },
+        // ★ Keep notification alive as a foreground service
+        asForegroundService: true,
+        foregroundServiceTypes: [AndroidForegroundServiceType.PHONE_CALL],
+        // ★ WhatsApp-style Decline | Answer action buttons
+        actions: [
+          {
+            title: "Decline",
+            pressAction: { id: "decline_call" },
+            icon: "ic_launcher",
+          },
+          {
+            title: "Answer",
+            pressAction: { id: "accept_call", launchActivity: "default" },
+            icon: "ic_launcher",
+          },
+        ],
+        timestamp: Date.now(),
+        showTimestamp: true,
+      },
+    });
     console.log(
-      `📞 Displayed call notification via CallKeep: ${callerName} (${callType})`,
+      `📞 WhatsApp-style call notification displayed: ${callerName} (${callType})`,
     );
   } catch (err) {
-    console.error("CallKeep display error:", err);
+    console.error("Call notification display error:", err);
   }
 }
 
 // ─── Cancel Call Notification ───────────────────────────────────────────────
 async function cancelCallNotification() {
   try {
-    // Try to cancel CallKeep UI
-    try {
-      const RNCallKeep = require("react-native-callkeep").default;
-      RNCallKeep.endAllCalls();
-    } catch (e) {}
-
     if (notifee) {
       if (Platform.OS === "android") {
         try {
@@ -644,36 +685,9 @@ async function initializeNotifications(navigationRef) {
     }
   });
 
-  // ─── CallKeep Native Event Handlers ─────────────────────────────────────
-  try {
-    const RNCallKeep = require("react-native-callkeep").default;
-    RNCallKeep.addEventListener("answerCall", ({ callUUID }) => {
-      console.log(`📞 CallKeep User Answered: ${callUUID}`);
-      cancelCallNotification();
-      // Bring app to foreground
-      RNCallKeep.backToForeground();
-      // We only have the callUUID, but CallScreen can fetch the rest / negotiate
-      // or join using just the callId via socket auto-sync if we pass it.
-      handleNotificationNavigation(
-        { callId: callUUID, type: "call", acceptFromNotification: true },
-        navigationRef,
-      );
-    });
-
-    RNCallKeep.addEventListener("endCall", ({ callUUID }) => {
-      console.log(`📞 CallKeep User Declined/Ended: ${callUUID}`);
-      cancelCallNotification();
-      if (callUUID) {
-        const apiClient = require("./api").default;
-        const { endpoints } = require("../config/api");
-        apiClient
-          .post(endpoints.calls.reject, { callId: callUUID })
-          .catch(() => {});
-      }
-    });
-  } catch (err) {
-    console.warn("CallKeep event binding error:", err);
-  }
+  // ─── Notifee Call Action Handlers (WhatsApp-style Accept/Decline) ─────────
+  // These are handled here for foreground events (when the app is open).
+  // Background events are handled in index.js onBackgroundEvent.
 
   // Notifee tap/action handler
   if (notifee && NotifeeEventType) {

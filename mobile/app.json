@@ -45,11 +45,15 @@
         "android.permission.RECEIVE_BOOT_COMPLETED"
       ],
       "blockedPermissions": [
-        "android.permission.READ_PHONE_STATE",
         "android.permission.READ_CALL_LOG",
         "android.permission.READ_CONTACTS",
         "android.permission.READ_SMS",
         "android.permission.SEND_SMS",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_PHONE_NUMBERS",
+        "android.permission.CALL_PHONE",
+        "android.permission.MANAGE_OWN_CALLS",
+        "android.permission.BIND_TELECOM_CONNECTION_SERVICE",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_BACKGROUND_LOCATION"
@@ -66,7 +70,6 @@
       ],
       "@react-native-firebase/app",
       "@react-native-firebase/messaging",
-      "@config-plugins/react-native-callkeep",
       "./plugins/withCallNotifications",
       [
         "expo-notifications",
