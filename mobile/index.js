@@ -88,7 +88,7 @@ if (Platform.OS !== "web") {
     const messaging = require("@react-native-firebase/messaging").default;
     const notifeeModule = require("@notifee/react-native");
     const notifee = notifeeModule.default;
-    const { AndroidImportance, AndroidStyle, AndroidVisibility } =
+    const { AndroidImportance, AndroidStyle, AndroidVisibility, AndroidCategory } =
       notifeeModule;
 
     // ─── Notification Channel IDs (must match notifications.js) ───────────
@@ -163,6 +163,7 @@ if (Platform.OS !== "web") {
           data,
           android: {
             channelId: CHANNELS.CALLS,
+            category: AndroidCategory.CALL,
             importance: AndroidImportance.MAX,
             visibility: AndroidVisibility.PUBLIC,
             smallIcon: NOTIF_SMALL_ICON,

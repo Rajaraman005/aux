@@ -76,6 +76,48 @@ async function requestNotificationPermission() {
       console.log(
         `📱 Notification permission: ${granted ? "✅ granted" : "❌ denied"} (status: ${settings.authorizationStatus})`,
       );
+
+      // ★ Check USE_FULL_SCREEN_INTENT on Android 14+ (API 34)
+      // Without this permission, fullScreenAction notifications silently
+      // downgrade to heads-up and never show full-screen.
+      if (granted && Platform.Version >= 34) {
+        try {
+          const { NativeModules, Linking, Alert } = require("react-native");
+          const notificationManager =
+            NativeModules.NotifeeApiModule || NativeModules.RNNotifee;
+
+          // Notifee provides getNotificationSettings which includes
+          // android.alarm (USE_FULL_SCREEN_INTENT on 14+)
+          const notifSettings = await notifee.getNotificationSettings();
+          const canFullScreen =
+            notifSettings?.android?.alarm === 1; // 1 = ENABLED
+
+          if (!canFullScreen) {
+            console.log(
+              "⚠️  USE_FULL_SCREEN_INTENT not granted — prompting user",
+            );
+            Alert.alert(
+              "Enable Full-Screen Calls",
+              "To show incoming calls over your lock screen (like WhatsApp), please enable 'Full-screen notifications' for this app.",
+              [
+                { text: "Later", style: "cancel" },
+                {
+                  text: "Open Settings",
+                  onPress: () => {
+                    // Open the app's notification settings
+                    Linking.openSettings();
+                  },
+                },
+              ],
+            );
+          } else {
+            console.log("✅ USE_FULL_SCREEN_INTENT permission granted");
+          }
+        } catch (permErr) {
+          console.log("Full-screen permission check error:", permErr.message);
+        }
+      }
+
       return granted;
     } catch (err) {
       console.error("Notifee permission request error:", err);

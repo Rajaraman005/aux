@@ -402,11 +402,31 @@ function RootNavigator() {
   const { isAuthenticated, isLoading } = useAuth();
   const navigationRef = useRef(null);
 
-  // ★ Request notification permission immediately on app start.
-  // This ensures fresh installs see the Android 13+ permission dialog
-  // on the very first screen (before login), just like WhatsApp.
+  // ★ Request all permissions immediately on app start.
+  // This ensures fresh installs see the permission dialogs for Notifications,
+  // Camera, Microphone, and Contacts on the very first screen.
   React.useEffect(() => {
-    requestNotificationPermission();
+    async function requestAllPermissions() {
+      if (Platform.OS === "android") {
+        try {
+          const { PermissionsAndroid } = require("react-native");
+          // Request core device permissions first
+          await PermissionsAndroid.requestMultiple([
+            PermissionsAndroid.PERMISSIONS.CAMERA,
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+            PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+          ]);
+        } catch (err) {
+          console.warn("Failed to request core Android permissions:", err);
+        }
+      }
+      
+      // Request notification permission (handles Android 13+ POST_NOTIFICATIONS)
+      // This also checks for Android 14+ USE_FULL_SCREEN_INTENT
+      await requestNotificationPermission();
+    }
+
+    requestAllPermissions();
   }, []);
 
   // Initialize push notification listeners
