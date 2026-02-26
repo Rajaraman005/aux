@@ -132,7 +132,7 @@ async function setupNotificationChannels() {
     await notifee.createChannel({
       id: CHANNELS.CALLS,
       name: "Calls",
-      importance: AndroidImportance.HIGH,
+      importance: AndroidImportance.MAX,
       vibration: true,
       vibrationPattern: [0, 500, 200, 500, 200, 500],
       lights: true,

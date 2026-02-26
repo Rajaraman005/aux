@@ -107,7 +107,7 @@ if (Platform.OS !== "web") {
         await notifee.createChannel({
           id: CHANNELS.CALLS,
           name: "Calls",
-          importance: AndroidImportance.HIGH,
+          importance: AndroidImportance.MAX,
           vibration: true,
           sound: "default",
           visibility: AndroidVisibility.PUBLIC,
