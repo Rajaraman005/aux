@@ -123,18 +123,24 @@ async function setupNotificationChannels() {
       name: "Messages",
       importance: AndroidImportance.HIGH,
       vibration: true,
-      vibrationPattern: [0, 250, 250, 250],
+      vibrationPattern: [250, 250, 250, 250],
       lights: true,
       lightColor: "#6C63FF",
       sound: "default",
     });
+
+    // ★ Delete old calls channel first — Android caches channel settings
+    // and won't upgrade importance from HIGH to MAX without delete+recreate
+    try {
+      await notifee.deleteChannel(CHANNELS.CALLS);
+    } catch {}
 
     await notifee.createChannel({
       id: CHANNELS.CALLS,
       name: "Calls",
       importance: AndroidImportance.MAX,
       vibration: true,
-      vibrationPattern: [0, 500, 200, 500, 200, 500],
+      vibrationPattern: [500, 200, 500, 200, 500, 200],
       lights: true,
       lightColor: "#FF4444",
       sound: "default",
@@ -282,7 +288,7 @@ async function displayCallNotification(data) {
       android: {
         channelId: CHANNELS.CALLS,
         category: AndroidCategory?.CALL,
-        importance: AndroidImportance.HIGH,
+        importance: AndroidImportance.MAX,
         visibility: AndroidVisibility.PUBLIC,
         smallIcon: NOTIF_SMALL_ICON,
         color: "#6C63FF",
@@ -292,20 +298,28 @@ async function displayCallNotification(data) {
         // even when the app is killed/force-stopped (like WhatsApp calls)
         asForegroundService: true,
         foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
-        vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
+        vibrationPattern: [300, 500, 300, 500, 300, 500, 300, 500],
         // ★ Sound + loop for continuous ringtone like a real phone call
         sound: "default",
         loopSound: true,
-        lights: true,
-        lightColor: "#FF4444",
-        // ★ Full-screen intent — shows call UI over lock screen
+        lights: ["#FF4444", 300, 600],
+        // ★ Full-screen intent — shows IncomingCallScreen over lock screen
         fullScreenAction: {
           id: "default",
+          mainComponent: "incoming-call-screen",
+        },
+        // ★ Tap notification body → open incoming call screen
+        pressAction: {
+          id: "default",
+          mainComponent: "incoming-call-screen",
         },
         actions: [
           {
             title: "✅ Accept",
-            pressAction: { id: "accept_call" },
+            pressAction: {
+              id: "accept_call",
+              mainComponent: "incoming-call-screen",
+            },
           },
           {
             title: "❌ Decline",

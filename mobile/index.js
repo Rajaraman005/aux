@@ -74,6 +74,12 @@ try {
 
 crashLogger.log(CATEGORIES.APP_START, "index.js loaded — app process starting");
 
+// ─── Register Incoming Call Screen for Notifee fullScreenAction ─────────────
+// This component is launched by Android when a call notification's
+// fullScreenAction fires (screen OFF/locked).
+import IncomingCallScreen from "./src/components/IncomingCallScreen";
+AppRegistry.registerComponent("incoming-call-screen", () => IncomingCallScreen);
+
 // ─── Background Message Handler (MUST be registered before AppRegistry) ─────
 // This runs in a headless JS context when the app is killed/backgrounded.
 // It MUST be at the entry point level, not inside a React component.
@@ -104,6 +110,10 @@ if (Platform.OS !== "web") {
           vibration: true,
           sound: "default",
         });
+        // ★ Delete old calls channel — Android caches importance, must recreate
+        try {
+          await notifee.deleteChannel(CHANNELS.CALLS);
+        } catch {}
         await notifee.createChannel({
           id: CHANNELS.CALLS,
           name: "Calls",
@@ -153,22 +163,40 @@ if (Platform.OS !== "web") {
           data,
           android: {
             channelId: CHANNELS.CALLS,
-            importance: AndroidImportance.HIGH,
+            importance: AndroidImportance.MAX,
             visibility: AndroidVisibility.PUBLIC,
             smallIcon: NOTIF_SMALL_ICON,
             color: "#6C63FF",
             ongoing: true,
             autoCancel: false,
             asForegroundService: true,
-            vibrationPattern: [0, 500, 200, 500, 200, 500, 200, 500],
+            foregroundServiceBehavior: 4, // FOREGROUND_SERVICE_IMMEDIATE
+            vibrationPattern: [300, 500, 300, 500, 300, 500, 300, 500],
             sound: "default",
             loopSound: true,
-            lights: true,
-            lightColor: "#FF4444",
-            fullScreenAction: { id: "default" },
+            lights: ["#FF4444", 300, 600],
+            // ★ Full-screen intent — launches IncomingCallScreen over lock screen
+            fullScreenAction: {
+              id: "default",
+              mainComponent: "incoming-call-screen",
+            },
+            // ★ Tap notification body → open app
+            pressAction: {
+              id: "default",
+              mainComponent: "incoming-call-screen",
+            },
             actions: [
-              { title: "✅ Accept", pressAction: { id: "accept_call" } },
-              { title: "❌ Decline", pressAction: { id: "decline_call" } },
+              {
+                title: "✅ Accept",
+                pressAction: {
+                  id: "accept_call",
+                  mainComponent: "incoming-call-screen",
+                },
+              },
+              {
+                title: "❌ Decline",
+                pressAction: { id: "decline_call" },
+              },
             ],
           },
         });
@@ -243,6 +271,29 @@ if (Platform.OS !== "web") {
       }
     });
 
+    // ─── Foreground Service Registration ─────────────────────────────────
+    // ★ CRITICAL: When using asForegroundService:true in displayNotification,
+    // Notifee REQUIRES this handler. Without it, the notification is downgraded
+    // and fullScreenAction is silently ignored.
+    notifee.registerForegroundService((notification) => {
+      return new Promise((resolve) => {
+        // This promise keeps the foreground service alive.
+        // It resolves when the notification is cancelled (accept/decline/timeout).
+        // Listen for the notification being cancelled to stop the service.
+        const unsubscribe = notifee.onForegroundEvent(({ type, detail }) => {
+          const { EventType } = require("@notifee/react-native");
+          if (
+            type === EventType.DISMISSED ||
+            (type === EventType.ACTION_PRESS &&
+              detail.notification?.id === notification.id)
+          ) {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+    });
+
     // ─── Notifee Background Event Handler ─────────────────────────────────
     notifee.onBackgroundEvent(async ({ type, detail }) => {
       const { EventType } = require("@notifee/react-native");
@@ -253,19 +304,41 @@ if (Platform.OS !== "web") {
 
       if (type === EventType.ACTION_PRESS) {
         if (actionId === "accept_call") {
+          // Stop foreground service + cancel notification
+          try {
+            await notifee.stopForegroundService();
+          } catch {}
           await notifee.cancelNotification(CALL_NOTIFICATION_ID);
-          // App will open via fullScreenAction — CallScreen handles the rest
-        } else if (actionId === "decline_call" && notifData?.callId) {
+          // App will open via launchActivity — CallScreen handles the rest
+        } else if (actionId === "decline_call") {
+          // Stop foreground service + cancel notification
+          try {
+            await notifee.stopForegroundService();
+          } catch {}
           await notifee.cancelNotification(CALL_NOTIFICATION_ID);
           // Reject via REST API (no WebSocket in background)
+          if (notifData?.callId) {
+            try {
+              const apiClient = require("./src/services/api").default;
+              const { endpoints } = require("./src/config/api");
+              await apiClient.post(endpoints.calls.reject, {
+                callId: notifData.callId,
+              });
+            } catch {}
+          }
+        } else if (actionId === "default") {
+          // User tapped notification body — open app
           try {
-            const apiClient = require("./src/services/api").default;
-            const { endpoints } = require("./src/config/api");
-            await apiClient.post(endpoints.calls.reject, {
-              callId: notifData.callId,
-            });
+            await notifee.stopForegroundService();
           } catch {}
+          await notifee.cancelNotification(CALL_NOTIFICATION_ID);
         }
+      } else if (type === EventType.DISMISSED) {
+        // User swiped away the notification
+        try {
+          await notifee.stopForegroundService();
+        } catch {}
+        await notifee.cancelNotification(CALL_NOTIFICATION_ID);
       }
     });
 
