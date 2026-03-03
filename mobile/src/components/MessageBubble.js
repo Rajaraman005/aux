@@ -15,10 +15,10 @@ import {
   View,
   Text,
   StyleSheet,
-  Image,
   TouchableOpacity,
   ActivityIndicator,
 } from "react-native";
+import { Image } from "expo-image";
 import Icon from "react-native-vector-icons/Feather";
 import { colors, spacing } from "../styles/theme";
 import MediaViewer from "./MediaViewer";
@@ -145,7 +145,9 @@ function MessageBubble({ item, isMine }) {
                       : item.media_url,
                 }}
                 style={[styles.mediaImage, mediaDims]}
-                resizeMode="cover"
+                contentFit="cover"
+                transition={200}
+                placeholder={{ color: "#E0E0E0" }}
               />
 
               {/* Video Play Button Overlay */}
@@ -297,7 +299,7 @@ const styles = StyleSheet.create({
   mediaContainer: {
     borderRadius: 14,
     overflow: "hidden",
-    backgroundColor: "rgba(0,0,0,0.05)",
+    backgroundColor: "#E0E0E0",
   },
   mediaImage: {
     borderRadius: 14,

@@ -18,8 +18,8 @@ import {
   Dimensions,
   StatusBar,
   ActivityIndicator,
-  Image,
 } from "react-native";
+import { Image } from "expo-image";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { Video, ResizeMode } from "expo-av";
@@ -120,7 +120,9 @@ export default function MediaViewer({
             <Image
               source={{ uri: mediaUrl }}
               style={styles.image}
-              resizeMode="contain"
+              contentFit="contain"
+              transition={200}
+              placeholder={{ color: "#1a1a1a" }}
               onLoad={handleImageLoad}
             />
           )}

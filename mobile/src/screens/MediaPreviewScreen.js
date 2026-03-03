@@ -74,23 +74,26 @@ function normalizeAssets(rawAssets) {
     width: a.width,
     height: a.height,
     fileSize: a.fileSize || 0,
-    mimeType:
-      a.mimeType || (a.type === "video" ? "video/mp4" : "image/jpeg"),
+    mimeType: a.mimeType || (a.type === "video" ? "video/mp4" : "image/jpeg"),
     duration: a.duration ? a.duration / 1000 : 0,
     type: a.type === "video" ? "video" : "image",
   }));
 }
 
 export default function MediaPreviewScreen({ route, navigation }) {
-  const { pickType, pickSource, conversationId } = route.params;
+  const { pickType, pickSource, preselectedAssets, conversationId } =
+    route.params;
   const insets = useSafeAreaInsets();
   const { height: kbHeight } = useReanimatedKeyboardAnimation();
 
-  const [assets, setAssets] = useState([]);
+  // Initialize with pre-selected assets immediately — no black screen
+  const [assets, setAssets] = useState(
+    preselectedAssets ? normalizeAssets(preselectedAssets) : [],
+  );
   const [activeIndex, setActiveIndex] = useState(0);
   const [caption, setCaption] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [isPickerOpen, setIsPickerOpen] = useState(true);
+  const [isPickerOpen, setIsPickerOpen] = useState(false); // Only true if we need to open picker
   const videoRef = useRef(null);
   const didPickRef = useRef(false);
 
@@ -101,14 +104,23 @@ export default function MediaPreviewScreen({ route, navigation }) {
     transform: [{ translateY: kbHeight.value }],
   }));
 
-  // ─── Open picker immediately on mount ─────────────────────────────
+  // ─── Open picker immediately on mount if no preselected assets ──
   useEffect(() => {
+    if (preselectedAssets) {
+      // If preselectedAssets are provided, we don't need to open the picker.
+      // If assets are empty despite preselectedAssets being provided, navigate back.
+      if (assets.length === 0) navigation.goBack();
+      return;
+    }
+
+    // If no preselectedAssets, proceed with opening the picker
     if (didPickRef.current) return;
     didPickRef.current = true;
+    setIsPickerOpen(true); // Indicate picker is opening
 
     (async () => {
       const picked = await openPicker(pickType, pickSource);
-      setIsPickerOpen(false);
+      setIsPickerOpen(false); // Picker has closed
       if (!picked || picked.length === 0) {
         // User cancelled the picker → go back
         navigation.goBack();
@@ -116,12 +128,11 @@ export default function MediaPreviewScreen({ route, navigation }) {
       }
       setAssets(normalizeAssets(picked));
     })();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── Add more media ───────────────────────────────────────────────
   const handleAddMore = useCallback(async () => {
-    const { status } =
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== "granted") return;
 
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -202,15 +213,24 @@ export default function MediaPreviewScreen({ route, navigation }) {
   // ─── Loading state while picker is open ───────────────────────────
   if (isPickerOpen || assets.length === 0) {
     return (
-      <View style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#000" translucent={false} />
+      <View style={[styles.container, styles.loadingContainer]}>
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor="#000"
+          translucent={false}
+        />
+        <ActivityIndicator size="large" color="rgba(255,255,255,0.5)" />
       </View>
     );
   }
 
   return (
     <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" translucent={false} />
+      <StatusBar
+        barStyle="light-content"
+        backgroundColor="#000"
+        translucent={false}
+      />
 
       {/* ─── Top Bar ─────────────────────────────────────────────── */}
       <Animated.View
@@ -359,6 +379,10 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: "#000",
+  },
+  loadingContainer: {
+    justifyContent: "center",
+    alignItems: "center",
   },
   topBar: {
     flexDirection: "row",

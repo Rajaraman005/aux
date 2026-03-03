@@ -23,6 +23,7 @@ import {
   Modal,
   DeviceEventEmitter,
 } from "react-native";
+import * as ImagePicker from "expo-image-picker";
 import Animated, {
   useAnimatedStyle,
   interpolate,
@@ -211,14 +212,44 @@ export default function ChatScreen({ route, navigation }) {
     [inputText, conversationId, user],
   );
 
-  // ─── Media Pick → Navigate instantly → Picker opens on preview ──────
+  // ─── Media Pick → Open picker HERE, then navigate with pre-selected assets ─
   const handleMediaPick = useCallback(
-    (type, source) => {
+    async (type, source) => {
       setShowAttachMenu(false);
-      // Navigate immediately — MediaPreviewScreen opens the picker itself
+
+      // Open the picker inline (no black screen flash)
+      const mediaTypes = type === "video" ? ["videos"] : ["images"];
+      let result;
+      try {
+        if (source === "camera") {
+          const { status } = await ImagePicker.requestCameraPermissionsAsync();
+          if (status !== "granted") return;
+          result = await ImagePicker.launchCameraAsync({
+            mediaTypes,
+            allowsEditing: false,
+            quality: 0.8,
+            videoMaxDuration: 60,
+          });
+        } else {
+          const { status } =
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (status !== "granted") return;
+          result = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes,
+            allowsEditing: false,
+            quality: 0.8,
+            videoMaxDuration: 60,
+          });
+        }
+      } catch {
+        return;
+      }
+
+      if (result?.canceled || !result?.assets?.length) return;
+
+      // Navigate to preview with already-picked assets — no black flash
       navigation.navigate("MediaPreview", {
-        pickType: type,
-        pickSource: source,
+        preselectedAssets: result.assets,
         conversationId,
       });
     },
