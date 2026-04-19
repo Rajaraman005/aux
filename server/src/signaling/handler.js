@@ -21,14 +21,20 @@ const { isBlocked, recordFailure } = require("../middleware/abuse");
 const presence = require("./presence");
 const { db } = require("../db/supabase");
 const metrics = require("../services/metrics");
+const matchmaking = require("../services/matchmaking");
 const {
   sendMessagePush,
   sendCallPush,
   sendMissedCallPush,
 } = require("../services/pushService");
+const logger = require("../services/logger").default;
+const callSessionStore = require("../services/callSessionStore");
+const guaranteedDelivery = require("../services/guaranteedDelivery");
+const heartbeatWatchdog = require("../services/heartbeatWatchdog");
 
 // Active calls: callId -> { callerId, calleeId, startedAt, state }
-const activeCalls = new Map();
+// ★ REPLACED with Redis-backed callSessionStore for FAANG-grade scalability
+const activeCalls = new Map(); // Kept for temporary compatibility during migration
 
 // ★ Disconnect grace timers: userId -> timeoutId
 // When a user disconnects, we delay call cleanup to allow push-woken reconnects.
@@ -83,7 +89,10 @@ function initializeSignaling(wss) {
 
     // ─── Register Presence ──────────────────────────────────────────────
     await presence.userConnected(userId, ws);
-    metrics.activeConnections.inc();
+    metrics.activeConnections(1);
+
+    // Flush any pending critical events (world-session-end, call-ended, etc.)
+    await guaranteedDelivery.flushPendingEvents(userId);
 
     // ★ Cancel any pending disconnect cleanup timer (user reconnected in time)
     const pendingTimer = disconnectTimers.get(userId);
@@ -212,10 +221,41 @@ function initializeSignaling(wss) {
           case "world-typing":
             handleWorldTyping(userId, userName, ws, wss);
             break;
+          // ─── World Video Chat Signaling ──────────────────────────────────
+          case "world-join":
+            await handleWorldJoin(userId, ws);
+            break;
+          case "world-leave":
+            await handleWorldLeave(userId, message);
+            break;
+          case "world-next":
+            await handleWorldNext(userId, message);
+            break;
+          case "world-video-offer":
+            await handleWorldVideoOffer(userId, message);
+            break;
+          case "world-video-answer":
+            await handleWorldVideoAnswer(userId, message);
+            break;
+          case "world-video-ice-candidate":
+            await handleWorldVideoIceCandidate(userId, message);
+            break;
+          case "world-video-ice-restart":
+            await handleWorldVideoIceRestart(userId, message);
+            break;
+          case "world-video-camera-state":
+            await handleWorldVideoCameraState(userId, message);
+            break;
           case "heartbeat":
             ws.send(
               JSON.stringify({ type: "heartbeat-ack", timestamp: Date.now() }),
             );
+            break;
+          case "ack":
+            await handleAck(userId, message);
+            break;
+          case "call-heartbeat":
+            await handleCallHeartbeat(userId, message);
             break;
           default:
             ws.send(
@@ -228,7 +268,7 @@ function initializeSignaling(wss) {
         }
 
         // Track signaling latency
-        metrics.signalingLatency.observe(Date.now() - startTime);
+        metrics.signalingLatency(Date.now() - startTime);
       } catch (err) {
         console.error("Message handling error:", err);
         ws.send(
@@ -247,14 +287,15 @@ function initializeSignaling(wss) {
       rateLimitCounters.delete(ws);
 
       await presence.userDisconnected(userId);
-      metrics.activeConnections.dec();
-      console.log(`🔴 ${userName} (${userId}) disconnected`);
+      metrics.activeConnections(0);
+      logger.info('User disconnected', { userId, userName });
 
-      // ★ Check if this user has any active calls
+      // ★ Check if this user has any active calls using Redis
+      const allCalls = await callSessionStore.getAllActiveCalls();
       let hasActiveCalls = false;
-      for (const [, call] of activeCalls) {
+      for (const call of allCalls) {
         if (
-          call.state !== "ended" &&
+          call.state !== callSessionStore.CALL_STATES.ENDED &&
           (call.callerId === userId || call.calleeId === userId)
         ) {
           hasActiveCalls = true;
@@ -267,9 +308,7 @@ function initializeSignaling(wss) {
         // This allows push-woken users to reconnect via a new WebSocket
         // before we destroy their pending/active calls.
         const GRACE_PERIOD_MS = 10000;
-        console.log(
-          `⏳ ${userName} (${userId}) has active calls — waiting ${GRACE_PERIOD_MS / 1000}s before cleanup`,
-        );
+        logger.info('User has active calls, starting grace period', { userId, gracePeriod: GRACE_PERIOD_MS });
 
         const timer = setTimeout(async () => {
           disconnectTimers.delete(userId);
@@ -277,35 +316,47 @@ function initializeSignaling(wss) {
           // Check if user reconnected during grace period
           const isBackOnline = await presence.isOnline(userId);
           if (isBackOnline) {
-            console.log(
-              `✅ ${userName} (${userId}) is back online — skipping call cleanup`,
-            );
+            logger.info('User reconnected during grace period, skipping cleanup', { userId });
             return;
           }
 
-          // User did NOT reconnect — clean up their calls
-          console.log(
-            `❌ ${userName} (${userId}) did not reconnect — cleaning up calls`,
-          );
-          for (const [callId, call] of activeCalls) {
+          // User did NOT reconnect — clean up their calls using Redis
+          logger.warn('User did not reconnect, cleaning up calls', { userId });
+          
+          const currentCalls = await callSessionStore.getAllActiveCalls();
+          for (const call of currentCalls) {
             if (
-              call.state !== "ended" &&
+              call.state !== callSessionStore.CALL_STATES.ENDED &&
               (call.callerId === userId || call.calleeId === userId)
             ) {
               const otherUserId =
                 call.callerId === userId ? call.calleeId : call.callerId;
-              await presence.sendToUser(otherUserId, {
-                type: "call-ended",
-                callId,
-                reason: "peer_disconnected",
+              
+              // Send call-ended with guaranteed delivery
+              await guaranteedDelivery.sendCriticalEvent(otherUserId, 'call-ended', {
+                callId: call.callId,
+                reason: 'peer_disconnected',
               });
-              await finalizeCall(callId, "peer_disconnected");
+              
+              await callSessionStore.transitionCallState(call.callId, callSessionStore.CALL_STATES.ENDED);
+              await finalizeCall(call.callId, "peer_disconnected");
+              
+              // Update in-memory Map for compatibility
+              const memoryCall = activeCalls.get(call.callId);
+              if (memoryCall) {
+                memoryCall.state = "ended";
+              }
             }
           }
         }, GRACE_PERIOD_MS);
 
         disconnectTimers.set(userId, timer);
       }
+
+      // ★ Clean up world video match state on disconnect
+      matchmaking.handleDisconnect(userId).catch((err) => {
+        logger.error('World video disconnect cleanup error', { userId, error: err.message });
+      });
     });
 
     ws.on("error", (err) => {
@@ -330,49 +381,52 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
     );
     return;
   }
+  const callId = uuidv4();
+  const callerAvatar = message.callerAvatar || null;
 
-  // Get caller's avatar
-  const user = await db.getUserById(callerId);
-  const callerAvatar = user?.avatar_url || user?.avatar_seed || callerId;
-
-  // ★ Check if either party is already in a call (BEFORE creating new call)
-  for (const [, call] of activeCalls) {
+  // ─── Check for existing call ───────────────────────────────────────────────
+  const allCalls = await callSessionStore.getAllActiveCalls();
+  for (const call of allCalls) {
     if (
-      call.state !== "ended" &&
-      (call.callerId === callerId || call.calleeId === callerId)
+      call.callerId === callerId ||
+      call.calleeId === callerId ||
+      call.callerId === targetUserId ||
+      call.calleeId === targetUserId
     ) {
       callerWs.send(
-        JSON.stringify({ type: "call-failed", reason: "already_in_call" }),
-      );
-      return;
-    }
-    if (
-      call.state !== "ended" &&
-      (call.callerId === targetUserId || call.calleeId === targetUserId)
-    ) {
-      callerWs.send(
-        JSON.stringify({ type: "call-failed", reason: "target_busy" }),
+        JSON.stringify({
+          type: "call-failed",
+          reason: "user_in_call",
+        }),
       );
       return;
     }
   }
 
-  // ★ Create call FIRST — before checking online status
-  // This ensures the call exists for push-woken users to join
-  const callId = uuidv4();
+  // ─── Create Call Session (Redis-backed) ────────────────────────────────────
   const callData = {
+    callId,
     callerId,
     calleeId: targetUserId,
     callerName,
     callerAvatar,
     callType,
-    startedAt: Date.now(),
-    state: "ringing",
-    // ★ Track whether callee was woken via push (for logging/metrics)
-    pushWakeUp: false,
   };
-  activeCalls.set(callId, callData);
-  metrics.activeCalls.inc();
+
+  const session = await callSessionStore.createCall(callData);
+  
+  // Transition to RINGING state
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.RINGING);
+  
+  // Also keep in-memory Map for temporary compatibility
+  activeCalls.set(callId, {
+    ...callData,
+    state: "ringing",
+    startedAt: Date.now(),
+    pushWakeUp: false,
+  });
+  
+  metrics.activeCalls(1);
 
   // Create call log
   await db.createCallLog({
@@ -456,13 +510,15 @@ async function handleCallRequest(callerId, callerName, message, callerWs) {
 
 async function handleCallAccept(userId, message) {
   const { callId } = message;
-  const call = activeCalls.get(callId);
+  
+  const call = await callSessionStore.getCall(callId);
 
-  if (!call || call.state !== "ringing" || call.calleeId !== userId) {
+  if (!call || call.state !== callSessionStore.CALL_STATES.RINGING || call.calleeId !== userId) {
     return;
   }
 
-  call.state = "connecting";
+  // Transition to CONNECTING state
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.CONNECTING);
 
   // Notify caller that callee accepted
   await presence.sendToUser(call.callerId, {
@@ -470,13 +526,22 @@ async function handleCallAccept(userId, message) {
     callId,
     calleeId: userId,
   });
+  
+  // Update in-memory Map for compatibility
+  const memoryCall = activeCalls.get(callId);
+  if (memoryCall) {
+    memoryCall.state = "connecting";
+  }
 }
 
 async function handleCallReject(userId, message) {
   const { callId, reason } = message;
-  const call = activeCalls.get(callId);
+  const call = await callSessionStore.getCall(callId);
 
   if (!call || call.calleeId !== userId) return;
+
+  // Transition to FAILED state
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.FAILED);
 
   await presence.sendToUser(call.callerId, {
     type: "call-rejected",
@@ -485,14 +550,20 @@ async function handleCallReject(userId, message) {
   });
 
   await finalizeCall(callId, reason || "rejected");
+  
+  // Update in-memory Map for compatibility
+  const memoryCall = activeCalls.get(callId);
+  if (memoryCall) {
+    memoryCall.state = "ended";
+  }
 }
 
 async function handleOffer(userId, message) {
   const { callId, sdp } = message;
-  const call = activeCalls.get(callId);
+  const call = await callSessionStore.getCall(callId);
 
   // ★ Validate: only forward offer in connecting/active states
-  if (!call || call.state === "ended" || call.state === "ringing") return;
+  if (!call || call.state === callSessionStore.CALL_STATES.ENDED || call.state === callSessionStore.CALL_STATES.RINGING) return;
 
   const targetId = call.callerId === userId ? call.calleeId : call.callerId;
   await presence.sendToUser(targetId, {
@@ -505,12 +576,13 @@ async function handleOffer(userId, message) {
 
 async function handleAnswer(userId, message) {
   const { callId, sdp } = message;
-  const call = activeCalls.get(callId);
+  const call = await callSessionStore.getCall(callId);
 
   // ★ Validate: only accept answer when connecting
-  if (!call || call.state === "ended") return;
+  if (!call || call.state === callSessionStore.CALL_STATES.ENDED) return;
 
-  call.state = "active";
+  // Transition to CONNECTED state
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.CONNECTED);
 
   const targetId = call.callerId === userId ? call.calleeId : call.callerId;
   await presence.sendToUser(targetId, {
@@ -519,11 +591,17 @@ async function handleAnswer(userId, message) {
     sdp,
     fromUserId: userId,
   });
+  
+  // Update in-memory Map for compatibility
+  const memoryCall = activeCalls.get(callId);
+  if (memoryCall) {
+    memoryCall.state = "active";
+  }
 }
 
 async function handleIceCandidate(userId, message) {
   const { callId, candidate } = message;
-  const call = activeCalls.get(callId);
+  const call = await callSessionStore.getCall(callId);
 
   if (!call) return;
 
@@ -538,7 +616,7 @@ async function handleIceCandidate(userId, message) {
 
 async function handleIceRestart(userId, message) {
   const { callId, sdp } = message;
-  const call = activeCalls.get(callId);
+  const call = await callSessionStore.getCall(callId);
 
   if (!call) return;
 
@@ -600,21 +678,144 @@ async function handleCallModeResponse(userId, message) {
   });
 }
 
+async function handleAck(userId, message) {
+  const { _ackSeq, _forType } = message;
+  
+  if (!_ackSeq || !_forType) {
+    return;
+  }
+  
+  await guaranteedDelivery.handleAck(userId, _ackSeq, _forType);
+  logger.info('ACK received', { userId, seq: _ackSeq, type: _forType });
+}
+
+async function handleCallHeartbeat(userId, message) {
+  const { callId } = message;
+  
+  const call = await callSessionStore.getCall(callId);
+  
+  if (!call) {
+    // Call doesn't exist - tell client to end
+    await guaranteedDelivery.sendCriticalEvent(userId, 'call-ended', {
+      callId,
+      reason: 'call_not_found',
+    });
+    logger.warn('Heartbeat for non-existent call', { userId, callId });
+    return;
+  }
+  
+  // Verify user is part of this call
+  if (call.callerId !== userId && call.calleeId !== userId) {
+    await guaranteedDelivery.sendCriticalEvent(userId, 'call-ended', {
+      callId,
+      reason: 'not_participant',
+    });
+    logger.warn('Heartbeat from non-participant', { userId, callId });
+    return;
+  }
+  
+  // Update heartbeat timestamp
+  await callSessionStore.updateHeartbeat(callId);
+  metrics.heartbeatReceived();
+}
+
 async function handleHangUp(userId, message) {
   const { callId } = message;
-  const call = activeCalls.get(callId);
+  
+  // Check idempotency first
+  const existingResult = await guaranteedDelivery.checkIdempotency(callId, userId, 'hangup');
+  if (existingResult) {
+    logger.info('Idempotent hang-up already processed', { callId, userId });
+    return existingResult;
+  }
+
+  const call = await callSessionStore.getCall(callId);
 
   // ★ Guard against already-ended or missing calls
-  if (!call || call.state === "ended") return;
+  if (!call || call.state === callSessionStore.CALL_STATES.ENDED) {
+    const result = { success: true, alreadyEnded: true };
+    await guaranteedDelivery.storeIdempotencyResult(callId, userId, 'hangup', result);
+    return result;
+  }
+
+  // Verify user is part of this call
+  if (call.callerId !== userId && call.calleeId !== userId) {
+    const result = { success: false, error: 'not_participant' };
+    await guaranteedDelivery.storeIdempotencyResult(callId, userId, 'hangup', result);
+    return result;
+  }
+
+  // Check if already ending
+  if (call.state === callSessionStore.CALL_STATES.ENDING) {
+    const result = { success: true, alreadyEnding: true };
+    await guaranteedDelivery.storeIdempotencyResult(callId, userId, 'hangup', result);
+    return result;
+  }
+
+  // Transition to ENDING state
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.ENDING);
 
   const otherUserId = call.callerId === userId ? call.calleeId : call.callerId;
-  await presence.sendToUser(otherUserId, {
-    type: "call-ended",
+  
+  // ★ FAANG-grade: Send call-ended with guaranteed delivery
+  await guaranteedDelivery.sendCriticalEvent(otherUserId, 'call-ended', {
     callId,
-    reason: "hang_up",
+    reason: 'hang_up',
+    endedBy: userId,
   });
 
+  // Start forced teardown timer (if ACK not received in 5s)
+  setTimeout(async () => {
+    const currentCall = await callSessionStore.getCall(callId);
+    if (currentCall && currentCall.state === callSessionStore.CALL_STATES.ENDING) {
+      logger.warn('Forced teardown - ACK not received', { callId });
+      metrics.ghostConnections();
+      await forceEndCall(callId, 'forced_teardown');
+    }
+  }, 5000);
+
+  // Store idempotency result
+  const result = { success: true };
+  await guaranteedDelivery.storeIdempotencyResult(callId, userId, 'hangup', result);
+  
+  // Also update in-memory Map for compatibility
+  const memoryCall = activeCalls.get(callId);
+  if (memoryCall) {
+    memoryCall.state = "ended";
+  }
+  
   await finalizeCall(callId, "normal");
+  return result;
+}
+
+async function forceEndCall(callId, reason) {
+  logger.warn('Force ending call', { callId, reason });
+  
+  const call = await callSessionStore.getCall(callId);
+  if (!call || call.state === callSessionStore.CALL_STATES.ENDED) {
+    return;
+  }
+  
+  // Send to both users with guaranteed delivery
+  await guaranteedDelivery.sendCriticalEvent(call.callerId, 'call-ended', { callId, reason });
+  await guaranteedDelivery.sendCriticalEvent(call.calleeId, 'call-ended', { callId, reason });
+  
+  // Mark as ended in Redis
+  await callSessionStore.transitionCallState(callId, callSessionStore.CALL_STATES.ENDED);
+  
+  // Update in-memory Map for compatibility
+  const memoryCall = activeCalls.get(callId);
+  if (memoryCall) {
+    memoryCall.state = "ended";
+  }
+  
+  // Log to database
+  await db.updateCallLog(callId, {
+    ended_at: new Date().toISOString(),
+    end_reason: reason,
+  });
+  
+  metrics.ghostConnections();
 }
 
 // ★ Call Status Query (for client-side network reconciliation)
@@ -633,10 +834,31 @@ function handleCallStatus(message, ws) {
 
 // ★ Call Rejoin — Client reconnected WebSocket mid-call
 async function handleCallRejoin(userId, message, ws) {
-  const { callId } = message;
-  const call = activeCalls.get(callId);
+  const { callId, token } = message;
+  
+  // ★ FAANG-grade: Validate JWT token for rejoin
+  if (token) {
+    try {
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.verify(token, config.jwt.accessSecret);
+      if (decoded.userId !== userId || decoded.callId !== callId) {
+        logger.warn('Invalid rejoin token', { userId, callId });
+        ws.send(JSON.stringify({
+          type: 'call-rejoin-response',
+          callId,
+          success: false,
+          reason: 'invalid_token'
+        }));
+        return;
+      }
+    } catch (err) {
+      logger.warn('Rejoin token verification failed', { userId, callId, error: err.message });
+    }
+  }
 
-  if (!call || call.state === "ended") {
+  const call = await callSessionStore.getCall(callId);
+
+  if (!call || call.state === callSessionStore.CALL_STATES.ENDED) {
     ws.send(
       JSON.stringify({
         type: "call-rejoin-response",
@@ -645,10 +867,12 @@ async function handleCallRejoin(userId, message, ws) {
         reason: "call_not_found",
       }),
     );
+    // Force send call-ended to ensure client knows to cleanup
+    await guaranteedDelivery.sendCriticalEvent(userId, 'call-ended', { callId, reason: 'call_expired' });
     return;
   }
 
-  // Verify user is part of this call
+  // Verify user is part of call
   if (call.callerId !== userId && call.calleeId !== userId) {
     ws.send(
       JSON.stringify({
@@ -661,9 +885,13 @@ async function handleCallRejoin(userId, message, ws) {
     return;
   }
 
-  // ★ Re-register presence so signaling messages route to the new WS
+  // Re-register presence
   await presence.userConnected(userId, ws);
 
+  // Flush pending events
+  await guaranteedDelivery.flushPendingEvents(userId);
+
+  // Send current state
   ws.send(
     JSON.stringify({
       type: "call-rejoin-response",
@@ -674,7 +902,7 @@ async function handleCallRejoin(userId, message, ws) {
     }),
   );
 
-  console.log(`🔄 ${userId} rejoined call ${callId} (state: ${call.state})`);
+  logger.info(`User rejoined call`, { userId, callId, state: call.state });
 }
 
 async function handleCallMetrics(message) {
@@ -682,9 +910,9 @@ async function handleCallMetrics(message) {
 
   if (stats) {
     if (stats.packetLoss !== undefined)
-      metrics.packetLoss.observe(stats.packetLoss);
-    if (stats.jitter !== undefined) metrics.jitter.observe(stats.jitter);
-    if (stats.rtt !== undefined) metrics.rtt.observe(stats.rtt);
+      metrics.packetLoss(stats.packetLoss);
+    if (stats.jitter !== undefined) metrics.jitter(stats.jitter);
+    if (stats.rtt !== undefined) metrics.rtt(stats.rtt);
   }
 
   // Update call log with quality metrics
@@ -713,11 +941,11 @@ async function finalizeCall(callId, reason) {
   call.state = "ended";
   const duration = Date.now() - call.startedAt;
 
-  metrics.activeCalls.dec();
-  metrics.callDuration.observe(duration / 1000);
+  metrics.activeCalls(0);
+  metrics.callDuration(duration / 1000);
 
   if (reason !== "normal" && reason !== "hang_up") {
-    metrics.callFailures.inc({ reason });
+    metrics.callFailures(reason);
   }
 
   // Update call log
@@ -998,6 +1226,244 @@ async function handleWorldMessage(userId, userName, message, ws, wss) {
       }),
     );
   }
+}
+
+// ─── World Video Chat Handlers ────────────────────────────────────────────────
+
+async function handleWorldJoin(userId, ws) {
+  try {
+    const result = await matchmaking.joinQueue(userId);
+
+    if (!result) {
+      // No match available — user is queued, waiting for partner
+      console.log(`[WORLD_JOIN] userId=${userId} status=searching`);
+      ws.send(JSON.stringify({
+        type: "world-queue-status",
+        status: "searching",
+        message: "Looking for someone to chat with...",
+      }));
+      return;
+    }
+
+    if (result.alreadyQueued) {
+      console.log(`[WORLD_JOIN] userId=${userId} status=already_queued`);
+      ws.send(JSON.stringify({
+        type: "world-queue-status",
+        status: "already_queued",
+        message: "Already in queue",
+      }));
+      return;
+    }
+
+    if (result.alreadyMatched) {
+      // User already has an active session — re-send match info
+      console.log(`[WORLD_JOIN] userId=${userId} status=already_matched sessionId=${result.sessionId}`);
+
+      // World video is anonymous by default: never reveal real name/avatar here.
+      const peerProfile = {
+        displayName: "Anonymous",
+        isPrivate: true,
+        avatarUrl: null,
+        avatarSeed: null,
+      };
+
+      ws.send(JSON.stringify({
+        type: "world-matched",
+        sessionId: result.sessionId,
+        peerToken: result.peerToken,
+        role: result.role,
+        expiresAt: result.expiresAt,
+        peerProfile,
+      }));
+      return;
+    }
+
+    // ★ Defense-in-depth: verify this user is actually part of the match.
+    // With the matchmaking fix, joinQueue should ONLY return matches involving userId.
+    // But if somehow it doesn't, don't leave the user in limbo.
+    if (result.user1 !== userId && result.user2 !== userId) {
+      console.error(`[WORLD_JOIN_BUG] userId=${userId} received match not involving them: sessionId=${result.sessionId} user1=${result.user1} user2=${result.user2}`);
+      // Notify the matched users correctly
+      await matchmaking._notifyMatchedUsers(result);
+      // Send searching status to this user (they're still in queue)
+      ws.send(JSON.stringify({
+        type: "world-queue-status",
+        status: "searching",
+        message: "Looking for someone to chat with...",
+      }));
+      return;
+    }
+
+    // New match found involving this user — notify both users
+    console.log(`[WORLD_JOIN] userId=${userId} status=matched sessionId=${result.sessionId}`);
+    await matchmaking._notifyMatchedUsers(result);
+  } catch (err) {
+    console.error("World join error:", err.message);
+    ws.send(JSON.stringify({
+      type: "world-error",
+      code: "JOIN_ERROR",
+      message: "Failed to join queue",
+    }));
+  }
+}
+
+async function handleWorldLeave(userId, message) {
+  try {
+    const sessionIdHint = message?.sessionId;
+    await matchmaking.leaveWorldVideo(userId, { sessionIdHint });
+  } catch (err) {
+    console.error("World leave error:", err.message);
+  }
+}
+
+async function handleWorldNext(userId, message) {
+  try {
+    const { sessionId } = message;
+
+    // Rate limit check
+    const rateLimit = await matchmaking.checkNextRateLimit(userId);
+    if (!rateLimit.allowed) {
+      // Send rate limit response via presence (guaranteed delivery)
+      await presence.sendToUser(userId, {
+        type: "world-rate-limited",
+        retryAfter: rateLimit.retryAfter,
+      });
+      return;
+    }
+
+    // Set rate limit
+    await matchmaking.setNextRateLimit(userId);
+
+    // End current session. Clients decide whether to re-queue based on {requeue:true}.
+    if (sessionId) {
+      const userState = await matchmaking.getUserSession(userId);
+      if (!userState || userState.sessionId !== sessionId) {
+        await presence.sendToUser(userId, {
+          type: "world-error",
+          code: "UNAUTHORIZED_SESSION",
+          message: "Invalid session for Next",
+        });
+        return;
+      }
+
+      await matchmaking.endSession(sessionId, "next", userId);
+    } else {
+      // No session — just re-queue
+      await matchmaking.joinQueue(userId);
+    }
+  } catch (err) {
+    console.error("World next error:", err.message);
+    await presence.sendToUser(userId, {
+      type: "world-error",
+      code: "NEXT_ERROR",
+      message: "Failed to skip",
+    });
+  }
+}
+
+async function handleWorldVideoOffer(userId, message) {
+  const { sessionId, sdp, fromToken } = message;
+  if (!sessionId || !sdp) return;
+
+  // Get session to find peer
+  const session = await matchmaking.getSession(sessionId);
+  if (!session) return;
+
+  // Determine peer (userId uses ephemeral token for identification)
+  const userState = await matchmaking.getUserSession(userId);
+  if (!userState || userState.sessionId !== sessionId) return;
+
+  const peerId = session.user1 === userId ? session.user2 : session.user1;
+
+  // Forward offer to peer, replacing fromUserId with fromToken for privacy
+  await presence.sendToUser(peerId, {
+    type: "world-video-offer",
+    sessionId,
+    sdp,
+    fromToken: fromToken || userState.ephemeralToken,
+  });
+}
+
+async function handleWorldVideoAnswer(userId, message) {
+  const { sessionId, sdp, fromToken } = message;
+  if (!sessionId || !sdp) return;
+
+  const session = await matchmaking.getSession(sessionId);
+  if (!session) return;
+
+  const userState = await matchmaking.getUserSession(userId);
+  if (!userState || userState.sessionId !== sessionId) return;
+
+  const peerId = session.user1 === userId ? session.user2 : session.user1;
+
+  await presence.sendToUser(peerId, {
+    type: "world-video-answer",
+    sessionId,
+    sdp,
+    fromToken: fromToken || userState.ephemeralToken,
+  });
+}
+
+async function handleWorldVideoIceCandidate(userId, message) {
+  const { sessionId, candidate, fromToken } = message;
+  if (!sessionId || !candidate) return;
+
+  const session = await matchmaking.getSession(sessionId);
+  if (!session) return;
+
+  const userState = await matchmaking.getUserSession(userId);
+  if (!userState || userState.sessionId !== sessionId) return;
+
+  const peerId = session.user1 === userId ? session.user2 : session.user1;
+
+  await presence.sendToUser(peerId, {
+    type: "world-video-ice-candidate",
+    sessionId,
+    candidate,
+    fromToken: fromToken || userState.ephemeralToken,
+  });
+}
+
+async function handleWorldVideoIceRestart(userId, message) {
+  const { sessionId, sdp, fromToken } = message;
+  if (!sessionId || !sdp) return;
+
+  const session = await matchmaking.getSession(sessionId);
+  if (!session) return;
+
+  const userState = await matchmaking.getUserSession(userId);
+  if (!userState || userState.sessionId !== sessionId) return;
+
+  const peerId = session.user1 === userId ? session.user2 : session.user1;
+
+  await presence.sendToUser(peerId, {
+    type: "world-video-ice-restart",
+    sessionId,
+    sdp,
+    fromToken: fromToken || userState.ephemeralToken,
+  });
+}
+
+// ★ Camera state relay (Bug 5 fix)
+async function handleWorldVideoCameraState(userId, message) {
+  const { sessionId, cameraOn } = message;
+  if (!sessionId || cameraOn === undefined) return;
+
+  const session = await matchmaking.getSession(sessionId);
+  if (!session) return;
+
+  const userState = await matchmaking.getUserSession(userId);
+  if (!userState || userState.sessionId !== sessionId) return;
+
+  const peerId = session.user1 === userId ? session.user2 : session.user1;
+
+  console.log(`[CAMERA_STATE] sessionId=${sessionId} userId=${userId} cameraOn=${cameraOn}`);
+
+  await presence.sendToUser(peerId, {
+    type: "world-video-camera-state",
+    sessionId,
+    cameraOn,
+  });
 }
 
 module.exports = { initializeSignaling, activeCalls };

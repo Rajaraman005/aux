@@ -10,6 +10,13 @@
     "migrate": "node src/db/migrate.js"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.7.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.45.1",
+    "@opentelemetry/instrumentation": "^0.45.1",
+    "@opentelemetry/instrumentation-http": "^0.45.1",
+    "@opentelemetry/resources": "^1.18.1",
+    "@opentelemetry/sdk-trace-node": "^1.18.1",
+    "@opentelemetry/semantic-conventions": "^1.18.1",
     "@supabase/supabase-js": "^2.39.0",
     "argon2": "^0.31.2",
     "cloudinary": "^2.9.0",
@@ -23,9 +30,15 @@
     "mediasoup": "^3.13.0",
     "multer": "^2.0.2",
     "nodemailer": "^6.9.7",
+    "opossum": "^8.1.4",
+    "pino": "^8.16.2",
+    "pino-pretty": "^10.3.1",
     "prom-client": "^15.1.0",
+    "rate-limiter-flexible": "^4.0.1",
     "resend": "^6.9.2",
     "uuid": "^9.0.0",
+    "winston": "^3.11.0",
+    "winston-daily-rotate-file": "^4.7.1",
     "ws": "^8.16.0"
   },
   "devDependencies": {

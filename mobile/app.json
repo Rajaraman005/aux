@@ -21,6 +21,7 @@
       "bitcode": false
     },
     "android": {
+      "usesCleartextTraffic": true,
       "adaptiveIcon": {
         "backgroundColor": "#0a0a1a"
       },

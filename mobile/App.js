@@ -33,6 +33,7 @@ import {
   SignalingProvider,
   useSignaling,
 } from "./src/context/SignalingContext";
+import { UploadProvider } from "./src/context/UploadContext";
 import signalingClient from "./src/services/socket";
 import callManager from "./src/services/CallManager";
 import {
@@ -467,11 +468,13 @@ function RootNavigator() {
         }}
       >
         <InAppNotificationProvider navigationRef={navigationRef}>
-          {isAuthenticated ? (
-            <MainStack navigationRef={navigationRef} />
-          ) : (
-            <AuthStack />
-          )}
+          <UploadProvider>
+            {isAuthenticated ? (
+              <MainStack navigationRef={navigationRef} />
+            ) : (
+              <AuthStack />
+            )}
+          </UploadProvider>
         </InAppNotificationProvider>
       </NavigationContainer>
     </>

@@ -16,12 +16,14 @@ let RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, mediaDevices;
 let WEBRTC_AVAILABLE = false;
 
 try {
-  const webrtcModule = require("react-native-webrtc");
-  RTCPeerConnection = webrtcModule.RTCPeerConnection;
-  RTCSessionDescription = webrtcModule.RTCSessionDescription;
-  RTCIceCandidate = webrtcModule.RTCIceCandidate;
-  mediaDevices = webrtcModule.mediaDevices;
-  WEBRTC_AVAILABLE = true;
+  if (Platform.OS !== "web") {
+    const webrtcModule = require("react-native-webrtc");
+    RTCPeerConnection = webrtcModule.RTCPeerConnection;
+    RTCSessionDescription = webrtcModule.RTCSessionDescription;
+    RTCIceCandidate = webrtcModule.RTCIceCandidate;
+    mediaDevices = webrtcModule.mediaDevices;
+    WEBRTC_AVAILABLE = true;
+  }
 } catch (err) {
   console.warn(
     "⚠️  react-native-webrtc not available. Call features disabled.",
@@ -31,12 +33,14 @@ try {
 // ─── InCallManager for audio routing ─────────────────────────────────────────
 let InCallManager = null;
 try {
-  InCallManager = require("react-native-incall-manager").default;
+  if (Platform.OS !== "web") {
+    InCallManager = require("react-native-incall-manager").default;
+  }
 } catch (err) {
   console.warn("⚠️  InCallManager not available.");
 }
 
-import { AppState } from "react-native";
+import { AppState, Platform } from "react-native";
 import signalingClient from "./socket";
 import { endpoints } from "../config/api";
 import apiClient from "./api";
@@ -113,8 +117,13 @@ class WebRTCEngine {
     this.onLocalStream = null;
     this.onConnectionStateChange = null;
     this.onIceConnectionStateChange = null;
+    this.onIceCandidate = null; // Added for world video
+    this.onOffer = null; // ★ World video: intercept offer to route via world signaling
+    this.onAnswer = null; // ★ World video: intercept answer to route via world signaling
     this.onStats = null;
     this.onModeSwitch = null;
+    this.onRemoteCameraState = null; // ★ Bug 5: track remote camera on/off
+    this.onRemoteVideoFirstFrame = null; // ★ First frame decoded (prevents initial black screen)
 
     // Stats polling
     this.statsInterval = null;
@@ -130,9 +139,16 @@ class WebRTCEngine {
     this._maxIceRestarts = 3;
     this._iceRestartTimer = null;
 
+    // First-frame detection (remote video warmup)
+    this._firstFrameTimer = null;
+
     // ★ Cleanup guard — prevents recursive re-entry
     this._isCleaningUp = false;
     this._speakerOn = false;
+
+    // Persisted user intent (must survive stream re-creation / rematch)
+    this._micMuted = false;
+    this._cameraOff = false;
   }
 
   // ─── State Machine ─────────────────────────────────────────────────────────
@@ -150,6 +166,108 @@ class WebRTCEngine {
 
   get isAvailable() {
     return WEBRTC_AVAILABLE;
+  }
+
+  getMicMuted() {
+    return !!this._micMuted;
+  }
+
+  getCameraOff() {
+    return !!this._cameraOff;
+  }
+
+  getSpeakerOn() {
+    return !!this._speakerOn;
+  }
+
+  _applyMicMuted() {
+    const muted = !!this._micMuted;
+
+    // Best-effort OS-level mic mute (prevents some OEM audio pipeline leaks)
+    if (InCallManager && typeof InCallManager.setMicrophoneMute === "function") {
+      try {
+        InCallManager.setMicrophoneMute(muted);
+      } catch (e) {}
+    }
+
+    const tracks = this.localStream?.getAudioTracks?.() || [];
+    tracks.forEach((t) => {
+      try {
+        t.enabled = !muted;
+      } catch (e) {}
+    });
+  }
+
+  _applyCameraOff() {
+    const off = !!this._cameraOff;
+    const tracks = this.localStream?.getVideoTracks?.() || [];
+    tracks.forEach((t) => {
+      try {
+        t.enabled = !off;
+      } catch (e) {}
+    });
+  }
+
+  setMicMuted(muted) {
+    this._micMuted = !!muted;
+    this._applyMicMuted();
+    return this.getMicMuted();
+  }
+
+  setCameraOff(off) {
+    this._cameraOff = !!off;
+    this._applyCameraOff();
+    return this.getCameraOff();
+  }
+
+  _clearFirstFrameTimer() {
+    if (this._firstFrameTimer) {
+      clearInterval(this._firstFrameTimer);
+      this._firstFrameTimer = null;
+    }
+  }
+
+  _armFirstFrameDetector(track) {
+    this._clearFirstFrameTimer();
+
+    if (!this.pc || !track || track.kind !== "video") return;
+
+    const startedAt = Date.now();
+    this._firstFrameTimer = setInterval(async () => {
+      try {
+        if (!this.pc) {
+          this._clearFirstFrameTimer();
+          return;
+        }
+
+        // Stop trying after ~6s (avoid infinite timers)
+        if (Date.now() - startedAt > 6000) {
+          this._clearFirstFrameTimer();
+          return;
+        }
+
+        const stats = await this.pc.getStats(track);
+        let framesDecoded = 0;
+        let framesReceived = 0;
+
+        stats.forEach((report) => {
+          if (
+            report.type === "inbound-rtp" &&
+            (report.kind === "video" || report.mediaType === "video")
+          ) {
+            framesDecoded = Math.max(framesDecoded, report.framesDecoded || 0);
+            framesReceived = Math.max(framesReceived, report.framesReceived || 0);
+          }
+        });
+
+        if (framesDecoded > 0 || framesReceived > 0) {
+          this._clearFirstFrameTimer();
+          this.onRemoteVideoFirstFrame?.();
+        }
+      } catch (e) {
+        // Ignore transient getStats failures
+      }
+    }, 250);
   }
 
   // ─── Fetch TURN Credentials ────────────────────────────────────────────────
@@ -206,6 +324,9 @@ class WebRTCEngine {
         }
       });
 
+      // Apply persisted user intent to the newly created stream/tracks.
+      this._applyMicMuted();
+      this._applyCameraOff();
       this.onLocalStream?.(this.localStream);
     } catch (err) {
       if (videoEnabled) {
@@ -218,6 +339,9 @@ class WebRTCEngine {
           this.pc.addTrack(track, this.localStream);
         });
         this.isAudioOnly = true;
+        // Apply persisted user intent to the newly created stream/tracks.
+        this._applyMicMuted();
+        this._applyCameraOff();
         this.onLocalStream?.(this.localStream);
         this.onModeSwitch?.("audio_only", "video_capture_failed");
       } else {
@@ -230,6 +354,45 @@ class WebRTCEngine {
       if (event.streams && event.streams[0]) {
         this.remoteStream = event.streams[0];
         this.onRemoteStream?.(this.remoteStream);
+
+        // ★ Bug 2 fix: Track-level lifecycle listeners for ghost video prevention
+        const track = event.track;
+        const callId = this.callId; // Capture for logging
+
+        track.onended = () => {
+          console.log(`[TRACK_ENDED] callId=${callId} kind=${track.kind}`);
+          if (track.kind === 'video') {
+            this.onRemoteCameraState?.(false);
+          }
+          // If ALL tracks ended, clear stream entirely
+          const activeTracks = this.remoteStream?.getTracks().filter(t => t.readyState === 'live');
+          if (!activeTracks || activeTracks.length === 0) {
+            console.log(`[GHOST_VIDEO_PREVENTED] callId=${callId} reason=all_tracks_ended`);
+            this.onRemoteStream?.(null);
+            this.remoteStream = null;
+          }
+        };
+
+        track.onmute = () => {
+          console.log(`[TRACK_MUTED] callId=${callId} kind=${track.kind}`);
+          if (track.kind === 'video') {
+            this.onRemoteCameraState?.(false);
+          }
+        };
+
+        track.onunmute = () => {
+          console.log(`[TRACK_UNMUTED] callId=${callId} kind=${track.kind}`);
+          if (track.kind === 'video') {
+            this.onRemoteCameraState?.(true);
+            // Treat video track unmute as a good proxy for first frame availability
+            this.onRemoteVideoFirstFrame?.();
+          }
+        };
+
+        if (track.kind === 'video') {
+          // Poll stats until the first frame is decoded to prevent initial black screen.
+          this._armFirstFrameDetector(track);
+        }
       }
     };
 
@@ -239,7 +402,11 @@ class WebRTCEngine {
         console.log(
           `🧊 Sending ICE candidate: ${event.candidate.candidate.substring(0, 50)}...`,
         );
-        signalingClient.sendIceCandidate(this.callId, event.candidate);
+        if (this.onIceCandidate) {
+          this.onIceCandidate(event.candidate);
+        } else {
+          signalingClient.sendIceCandidate(this.callId, event.candidate);
+        }
       } else {
         console.log("🧊 ICE gathering complete");
       }
@@ -383,7 +550,18 @@ class WebRTCEngine {
     });
     offer.sdp = this.mungeOpusSDP(offer.sdp);
     await this.pc.setLocalDescription(offer);
-    signalingClient.sendOffer(this.callId, offer);
+
+    // ★ Fix: Add logging for debugging SDP issues
+    console.log('📤 createOffer completed, SDP length:', offer.sdp ? offer.sdp.length : 0);
+    
+    // ★ If onOffer callback is set (world video), use it instead of default 1:1 signaling
+    if (this.onOffer) {
+      console.log('📤 Calling onOffer callback');
+      this.onOffer(offer);
+    } else {
+      signalingClient.sendOffer(this.callId, offer);
+    }
+    return offer; // ★ Return the offer for callers that need the SDP
   }
 
   async handleOffer(sdp) {
@@ -393,7 +571,9 @@ class WebRTCEngine {
       this._pendingOffer = sdp;
       return;
     }
-    const desc = new RTCSessionDescription(sdp);
+    // ★ Normalize SDP — accept string or {type, sdp} object
+    const descInit = typeof sdp === 'string' ? { type: 'offer', sdp } : sdp;
+    const desc = new RTCSessionDescription(descInit);
     await this.pc.setRemoteDescription(desc);
     this._remoteDescriptionSet = true; // ★ Now safe to add ICE candidates
     // ★ Drain queued ICE candidates now that remoteDescription is set
@@ -401,7 +581,12 @@ class WebRTCEngine {
     const answer = await this.pc.createAnswer();
     answer.sdp = this.mungeOpusSDP(answer.sdp);
     await this.pc.setLocalDescription(answer);
-    signalingClient.sendAnswer(this.callId, answer);
+    // ★ If onAnswer callback is set (world video), use it instead of default 1:1 signaling
+    if (this.onAnswer) {
+      this.onAnswer(answer);
+    } else {
+      signalingClient.sendAnswer(this.callId, answer);
+    }
   }
 
   async handleAnswer(sdp) {
@@ -411,7 +596,9 @@ class WebRTCEngine {
       this._pendingAnswer = sdp;
       return;
     }
-    const desc = new RTCSessionDescription(sdp);
+    // ★ Normalize SDP — accept string or {type, sdp} object
+    const descInit = typeof sdp === 'string' ? { type: 'answer', sdp } : sdp;
+    const desc = new RTCSessionDescription(descInit);
     await this.pc.setRemoteDescription(desc);
     this._remoteDescriptionSet = true; // ★ Now safe to add ICE candidates
     // ★ Drain queued ICE candidates now that remoteDescription is set
@@ -543,21 +730,11 @@ class WebRTCEngine {
 
   // ─── Media Controls ────────────────────────────────────────────────────────
   toggleMute() {
-    const audioTrack = this.localStream?.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      return !audioTrack.enabled;
-    }
-    return false;
+    return this.setMicMuted(!this._micMuted);
   }
 
   toggleCamera() {
-    const videoTrack = this.localStream?.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      return !videoTrack.enabled;
-    }
-    return true;
+    return this.setCameraOff(!this._cameraOff);
   }
 
   async switchCamera() {
@@ -624,6 +801,7 @@ class WebRTCEngine {
       this.setTrackPriority(sender, "low");
 
       this.isAudioOnly = false;
+      this._applyCameraOff();
       this.onLocalStream?.(this.localStream);
 
       // ★ Switch InCallManager to video mode
@@ -677,6 +855,7 @@ class WebRTCEngine {
       this.pc.addTrack(videoTrack, this.localStream);
 
       this.isAudioOnly = false;
+      this._applyCameraOff();
       this.onLocalStream?.(this.localStream);
 
       if (InCallManager) {
@@ -741,6 +920,7 @@ class WebRTCEngine {
       audio: {
         bytesSent: 0,
         bytesReceived: 0,
+        packetsReceived: 0,
         packetLoss: 0,
         jitter: 0,
         bitrate: 0,
@@ -748,6 +928,7 @@ class WebRTCEngine {
       video: {
         bytesSent: 0,
         bytesReceived: 0,
+        packetsReceived: 0,
         packetLoss: 0,
         jitter: 0,
         bitrate: 0,
@@ -841,6 +1022,7 @@ class WebRTCEngine {
         clearTimeout(this._iceRestartTimer);
         this._iceRestartTimer = null;
       }
+      this._clearFirstFrameTimer();
 
       // Stop all tracks
       if (this.localStream) {
@@ -853,9 +1035,16 @@ class WebRTCEngine {
             e,
           );
         }
+        // ★ Bug 2 fix: Notify React BEFORE nulling reference
+        this.onLocalStream?.(null);
         this.localStream = null;
       }
       if (this.remoteStream) {
+        // ★ Bug 2 fix: Notify React BEFORE nulling reference
+        // This is the critical fix — without this, the RTCView keeps
+        // rendering the last decoded frame (ghost video)
+        console.log(`[GHOST_VIDEO_PREVENTED] callId=${this.callId} reason=cleanup`);
+        this.onRemoteStream?.(null);
         this.remoteStream = null;
       }
 
@@ -888,6 +1077,12 @@ class WebRTCEngine {
       this._remoteDescriptionSet = false;
       this._pendingOffer = null;
       this._pendingAnswer = null;
+
+      // ★ Reset world video signaling callbacks
+      this.onOffer = null;
+      this.onAnswer = null;
+      this.onIceCandidate = null;
+      this.onRemoteCameraState = null;
 
       this._setState(CALL_STATES.IDLE);
     } catch (err) {

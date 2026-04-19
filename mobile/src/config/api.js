@@ -69,6 +69,15 @@ const endpoints = {
   calls: {
     reject: `${API_BASE}/api/calls/reject`,
   },
+  worldVideo: {
+    report: `${API_BASE}/api/world-video/report`,
+    blocklist: `${API_BASE}/api/world-video/blocklist`,
+    block: (userId) => `${API_BASE}/api/world-video/block/${userId}`,
+    tosStatus: `${API_BASE}/api/world-video/tos-status`,
+    acceptTos: `${API_BASE}/api/world-video/accept-tos`,
+    status: `${API_BASE}/api/world-video/status`,
+    moderate: `${API_BASE}/api/world-video/moderate`,
+  },
   oauth: {
     googleUrl: `${API_BASE}/api/oauth/google/url`,
     connections: `${API_BASE}/api/oauth/connections`,

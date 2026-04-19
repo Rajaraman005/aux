@@ -39,10 +39,12 @@ import Icon from "react-native-vector-icons/Feather";
 // ─── Conditional WebRTC Import ───────────────────────────────────────────────
 let RTCView = null;
 let WEBRTC_AVAILABLE = false;
-try {
-  RTCView = require("react-native-webrtc").RTCView;
-  WEBRTC_AVAILABLE = true;
-} catch {}
+if (Platform.OS !== "web") {
+  try {
+    RTCView = require("react-native-webrtc").RTCView;
+    WEBRTC_AVAILABLE = true;
+  } catch {}
+}
 
 // ─── Haptic Feedback ─────────────────────────────────────────────────────────
 let Haptics = null;

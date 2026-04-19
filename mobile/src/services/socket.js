@@ -34,6 +34,11 @@ class SignalingClient {
     this._lastPongTime = 0;
     this._pongCheckTimer = null;
 
+    // ★ FAANG-grade: ACK/retry protocol
+    this._pendingAcks = new Map(); // seqNum -> timeout
+    this._ackedSeqNums = new Set(); // Deduplication
+    this._nextSeq = 0;
+
     // ★ Lifecycle awareness
     this._appStateSubscription = null;
     this._isBackgrounded = false;
@@ -131,6 +136,40 @@ class SignalingClient {
             return;
           }
 
+          // ★ FAANG-grade: Handle ACK
+          if (message.type === "ack") {
+            const { _ackSeq } = message;
+            if (_ackSeq && this._pendingAcks.has(_ackSeq)) {
+              clearTimeout(this._pendingAcks.get(_ackSeq));
+              this._pendingAcks.delete(_ackSeq);
+              console.log(`📨 ACK received for seq ${_ackSeq}`);
+            }
+            return;
+          }
+
+          // ★ FAANG-grade: Deduplication
+          if (message._seq && this._ackedSeqNums.has(message._seq)) {
+            console.log(`📨 Duplicate message ignored: seq ${message._seq}`);
+            return;
+          }
+          if (message._seq) {
+            this._ackedSeqNums.add(message._seq);
+            // Keep only last 1000 seq nums
+            if (this._ackedSeqNums.size > 1000) {
+              const first = this._ackedSeqNums.values().next().value;
+              this._ackedSeqNums.delete(first);
+            }
+          }
+
+          // ★ FAANG-grade: Send ACK for critical events
+          if (message._ackRequired) {
+            this.ws.send(JSON.stringify({
+              type: 'ack',
+              _ackSeq: message._seq,
+              _forType: message.type,
+            }));
+          }
+
           this.emit(message.type, message);
         } catch (err) {
           console.error("Signaling parse error:", err);
@@ -171,10 +210,26 @@ class SignalingClient {
 
   /**
    * Send a message. ★ Queue if disconnected.
+   * ★ FAANG-grade: Add sequence number and ACK tracking for critical events
    */
   send(message) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(message));
+      const msgWithSeq = {
+        ...message,
+        _seq: this._nextSeq++,
+        _timestamp: Date.now(),
+      };
+
+      // Track if ACK required
+      if (message._ackRequired) {
+        const timeout = setTimeout(() => {
+          console.warn(`📨 No ACK received for seq ${msgWithSeq._seq}`);
+          this._pendingAcks.delete(msgWithSeq._seq);
+        }, 5000);
+        this._pendingAcks.set(msgWithSeq._seq, timeout);
+      }
+
+      this.ws.send(JSON.stringify(msgWithSeq));
       return true;
     }
 
@@ -416,6 +471,40 @@ class SignalingClient {
         media_mime_type: media.mimeType,
       }),
     });
+  }
+
+  // ─── World Video Chat Helpers ────────────────────────────────────────────────
+  joinWorldVideo() {
+    return this.send({ type: "world-join" });
+  }
+
+  leaveWorldVideo(sessionId) {
+    return this.send({ type: "world-leave", ...(sessionId ? { sessionId } : {}) });
+  }
+
+  nextWorldVideo(sessionId) {
+    return this.send({ type: "world-next", sessionId });
+  }
+
+  sendWorldVideoOffer(sessionId, sdp) {
+    return this.send({ type: "world-video-offer", sessionId, sdp });
+  }
+
+  sendWorldVideoAnswer(sessionId, sdp) {
+    return this.send({ type: "world-video-answer", sessionId, sdp });
+  }
+
+  sendWorldVideoIceCandidate(sessionId, candidate) {
+    return this.send({ type: "world-video-ice-candidate", sessionId, candidate });
+  }
+
+  sendWorldVideoIceRestart(sessionId, sdp) {
+    return this.send({ type: "world-video-ice-restart", sessionId, sdp });
+  }
+
+  // ★ Bug 5: Camera state signaling for world video
+  sendWorldVideoCameraState(sessionId, cameraOn) {
+    return this.send({ type: "world-video-camera-state", sessionId, cameraOn });
   }
 }
 

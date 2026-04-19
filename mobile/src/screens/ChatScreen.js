@@ -46,6 +46,7 @@ import MessageBubble from "../components/MessageBubble";
 import TypingBubble from "../components/TypingBubble";
 import ProfilePictureViewer from "../components/ProfilePictureViewer";
 import { uploadMedia, cancelUpload } from "../services/mediaService";
+import { useUploadQueue } from "../context/UploadContext";
 import {
   startRecording,
   stopRecording,
@@ -89,7 +90,8 @@ export default function ChatScreen({ route, navigation }) {
   const [isTyping, setIsTyping] = useState(false);
   const [showAvatarViewer, setShowAvatarViewer] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
+
+  const { uploads, enqueue, cancel, retry, getStatus, isAnyUploading } = useUploadQueue();
 
   // Voice recording state
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
@@ -104,6 +106,8 @@ export default function ChatScreen({ route, navigation }) {
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef(0);
   const isNearBottomRef = useRef(true);
+  const isMountedRef = useRef(true);
+  const isSendingRef = useRef(new Set());
 
   const isOnline = onlineUsers.has(otherUser.id);
 
@@ -227,7 +231,6 @@ export default function ChatScreen({ route, navigation }) {
           result = await ImagePicker.launchCameraAsync({
             mediaTypes,
             allowsEditing: false,
-            quality: 0.8,
             videoMaxDuration: 60,
           });
         } else {
@@ -237,7 +240,6 @@ export default function ChatScreen({ route, navigation }) {
           result = await ImagePicker.launchImageLibraryAsync({
             mediaTypes,
             allowsEditing: false,
-            quality: 0.8,
             videoMaxDuration: 60,
           });
         }
@@ -247,7 +249,8 @@ export default function ChatScreen({ route, navigation }) {
 
       if (result?.canceled || !result?.assets?.length) return;
 
-      // Navigate to preview with already-picked assets — no black flash
+      // Navigate to preview — NO function in route.params (avoids non-serializable warning)
+      // MediaPreviewScreen will emit DeviceEventEmitter which we listen for below
       navigation.navigate("MediaPreview", {
         preselectedAssets: result.assets,
         conversationId,
@@ -257,20 +260,24 @@ export default function ChatScreen({ route, navigation }) {
   );
 
   // ─── Listen for media send events from MediaPreviewScreen ──────────
+  // DeviceEventEmitter is the sole communication channel (no non-serializable params)
   useEffect(() => {
+    // Composite handler: can be called from onSend callback or DeviceEventEmitter
+    const handleMediaSend = (mediaAssets, captionText) => {
+      const uploads = mediaAssets.map((item, idx) => {
+        const text = idx === 0 ? captionText : "";
+        return uploadAndSendMedia(item, text);
+      });
+      Promise.all(uploads).catch((err) =>
+        console.error("Parallel upload error:", err),
+      );
+    };
+
     const sub = DeviceEventEmitter.addListener(
       "media-preview-send",
       ({ targetConversationId, mediaAssets, caption }) => {
         if (targetConversationId !== conversationId) return;
-        let captionText = caption || "";
-        // Fire all uploads in parallel for speed
-        const uploads = mediaAssets.map((item, idx) => {
-          const text = idx === 0 ? captionText : "";
-          return uploadAndSendMedia(item, text);
-        });
-        Promise.all(uploads).catch((err) =>
-          console.error("Parallel upload error:", err),
-        );
+        handleMediaSend(mediaAssets, caption || "");
       },
     );
     return () => sub.remove();
@@ -280,8 +287,30 @@ export default function ChatScreen({ route, navigation }) {
   const uploadAndSendMedia = useCallback(
     async (asset, captionText) => {
       const mediaType = asset.type === "video" ? "video" : "image";
-      const uploadId = `chat_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       const tempId = generateTempId();
+
+      // Deduplication guard
+      if (isSendingRef.current.has(tempId)) return;
+      isSendingRef.current.add(tempId);
+
+      // Compress first
+      let compressed;
+      try {
+        const { compressForUpload } = require("../services/compressionService");
+        compressed = await compressForUpload(asset.uri, mediaType, {
+          width: asset.width,
+          height: asset.height,
+          duration: asset.duration,
+          mimeType: asset.mimeType,
+          fileSize: asset.fileSize,
+          source: "chat",
+        });
+      } catch (err) {
+        console.error("Compression error:", err);
+        isSendingRef.current.delete(tempId);
+        Alert.alert("Upload Error", "Failed to process media. Please try again.");
+        return;
+      }
 
       const optimistic = {
         tempId,
@@ -289,27 +318,56 @@ export default function ChatScreen({ route, navigation }) {
         sender_id: user.id,
         created_at: new Date().toISOString(),
         pending: true,
-        media_url: asset.uri,
+        media_url: compressed.uri || asset.uri,
         media_type: mediaType,
-        media_width: asset.width,
-        media_height: asset.height,
-        media_duration: asset.duration,
+        media_width: compressed.width || asset.width,
+        media_height: compressed.height || asset.height,
+        media_duration: compressed.duration || asset.duration,
         uploadProgress: 0,
+        uploadId: null,
+        uploadError: null,
       };
+      if (!isMountedRef.current) return;
       setMessages((prev) => [optimistic, ...prev]);
-      setIsUploading(true);
 
+      // Enqueue to upload queue for progress tracking
+      const uploadId = enqueue({
+        uri: compressed.uri || asset.uri,
+        mediaType,
+        fileSize: compressed.fileSize || asset.fileSize,
+        mimeType: compressed.mimeType || asset.mimeType,
+        width: compressed.width || asset.width,
+        height: compressed.height || asset.height,
+        duration: compressed.duration || asset.duration,
+        conversationId,
+        tempId,
+        caption: captionText,
+      });
+
+      // Store uploadId on optimistic message
+      if (!isMountedRef.current) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.tempId === tempId ? { ...m, uploadId } : m,
+        ),
+      );
+
+      // Watch upload progress via queue events
+      // The UploadContext updates the uploads Map, and we use uploadId to track
+
+      // Perform the actual upload
       try {
         const result = await uploadMedia({
-          uri: asset.uri,
+          uri: compressed.uri || asset.uri,
           mediaType,
-          fileSize: asset.fileSize,
-          mimeType: asset.mimeType,
-          width: asset.width,
-          height: asset.height,
-          duration: asset.duration,
+          fileSize: compressed.fileSize || asset.fileSize,
+          mimeType: compressed.mimeType || asset.mimeType,
+          width: compressed.width || asset.width,
+          height: compressed.height || asset.height,
+          duration: compressed.duration || asset.duration,
           uploadId,
           onProgress: (p) => {
+            if (!isMountedRef.current) return;
             setMessages((prev) =>
               prev.map((m) =>
                 m.tempId === tempId ? { ...m, uploadProgress: p } : m,
@@ -329,6 +387,7 @@ export default function ChatScreen({ route, navigation }) {
           mimeType: result.mimeType,
         };
 
+        if (!isMountedRef.current) return;
         setMessages((prev) =>
           prev.map((m) =>
             m.tempId === tempId
@@ -337,6 +396,7 @@ export default function ChatScreen({ route, navigation }) {
                   media_url: result.url,
                   media_thumbnail: result.thumbnailUrl,
                   uploadProgress: 1,
+                  uploadError: null,
                 }
               : m,
           ),
@@ -350,12 +410,23 @@ export default function ChatScreen({ route, navigation }) {
         );
       } catch (err) {
         console.error("Media upload failed:", err);
-        setMessages((prev) => prev.filter((m) => m.tempId !== tempId));
+        if (!isMountedRef.current) return;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.tempId === tempId
+              ? {
+                  ...m,
+                  uploadProgress: undefined,
+                  uploadError: err.message || "Upload failed. Tap to retry.",
+                }
+              : m,
+          ),
+        );
       } finally {
-        setIsUploading(false);
+        isSendingRef.current.delete(tempId);
       }
     },
-    [user, conversationId],
+    [user, conversationId, enqueue],
   );
 
   // ─── Voice Recording ───────────────────────────────────────────────
@@ -461,10 +532,21 @@ export default function ChatScreen({ route, navigation }) {
 
   // ─── Render ────────────────────────────────────────────────────────
   const renderMessage = useCallback(
-    ({ item }) => (
-      <MessageBubble item={item} isMine={item.sender_id === user.id} />
-    ),
-    [user.id],
+    ({ item, index }) => {
+      const isMine = item.sender_id === user.id;
+      // In inverted FlatList: index+1 is the message visually above
+      const prevItem = messages[index + 1];
+      const showSenderName = !prevItem || prevItem.sender_id !== item.sender_id;
+      return (
+        <MessageBubble
+          item={item}
+          isMine={isMine}
+          showSenderName={false}
+          senderName={isMine ? "You" : otherUser.name}
+        />
+      );
+    },
+    [user.id, otherUser.name, messages],
   );
 
   const keyExtractor = useCallback((item) => item.id || item.tempId, []);
@@ -473,8 +555,8 @@ export default function ChatScreen({ route, navigation }) {
     <View style={styles.container}>
       <StatusBar
         barStyle="dark-content"
-        backgroundColor={colors.bg}
-        translucent={false}
+        backgroundColor={Platform.OS === "ios" ? colors.bg : "transparent"}
+        translucent
       />
       <View style={[styles.statusBarSpacer, { height: insets.top }]} />
 
@@ -578,6 +660,17 @@ export default function ChatScreen({ route, navigation }) {
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color={colors.primary} />
             </View>
+          ) : messages.length === 0 ? (
+            <View style={styles.emptyChat}>
+              <Icon
+                name="message-circle"
+                size={48}
+                color={colors.textMuted}
+              />
+              <Text style={styles.emptyChatText}>
+                Say hello to {otherUser.name}!
+              </Text>
+            </View>
           ) : (
             <FlatList
               ref={flatListRef}
@@ -600,18 +693,6 @@ export default function ChatScreen({ route, navigation }) {
               initialNumToRender={20}
               updateCellsBatchingPeriod={50}
               removeClippedSubviews={Platform.OS === "android"}
-              ListEmptyComponent={
-                <View style={styles.emptyChat}>
-                  <Icon
-                    name="message-circle"
-                    size={48}
-                    color={colors.textMuted}
-                  />
-                  <Text style={styles.emptyChatText}>
-                    Say hello to {otherUser.name}!
-                  </Text>
-                </View>
-              }
             />
           )}
 
@@ -657,10 +738,10 @@ export default function ChatScreen({ route, navigation }) {
                 <TouchableOpacity
                   style={styles.attachButton}
                   onPress={() => setShowAttachMenu(true)}
-                  disabled={isUploading}
+                  disabled={isAnyUploading}
                   hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
-                  {isUploading ? (
+                  {isAnyUploading ? (
                     <ActivityIndicator size="small" color={colors.primary} />
                   ) : (
                     <Icon name="plus" size={22} color={colors.primary} />
@@ -693,9 +774,9 @@ export default function ChatScreen({ route, navigation }) {
                 ]}
                 onPressIn={handleRecordStart}
                 onPressOut={handleRecordStop}
-                disabled={isUploading}
-              >
-                <Icon
+disabled={isAnyUploading}
+               >
+                 <Icon
                   name="mic"
                   size={20}
                   color={isRecordingAudio ? "#fff" : colors.textInverse}
@@ -925,13 +1006,15 @@ const styles = StyleSheet.create({
 
   // Empty
   emptyChat: {
+    flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    paddingTop: 60,
   },
   emptyChatText: {
     ...typography.bodySmall,
+    textAlign: "center",
     marginTop: spacing.md,
+    color: colors.textMuted,
   },
 
   // Attachment Bottom Sheet

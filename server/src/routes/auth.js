@@ -68,7 +68,7 @@ router.post(
       // Check for existing user
       const existing = await db.getUserByEmail(email.toLowerCase());
       if (existing) {
-        metrics.authAttempts.inc({ action: "signup", result: "duplicate" });
+        metrics.authAttempts("signup", "duplicate");
         return res.status(409).json({
           error: "An account with this email already exists",
           code: "EMAIL_EXISTS",
@@ -104,19 +104,22 @@ router.post(
         expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       });
 
-      // Send verification email
-      await sendVerificationEmail(email, name, code);
-
-      metrics.authAttempts.inc({ action: "signup", result: "success" });
+      metrics.authAttempts("signup", "success");
 
       res.status(201).json({
         message: "Account created. Please verify your email.",
         userId,
         requiresVerification: true,
       });
+
+      // Send verification email (best-effort, async).
+      // Signup should succeed even if the email provider is slow/unavailable.
+      sendVerificationEmail(email, name, code).catch((err) => {
+        console.error("Verification email send error:", err?.message || err);
+      });
     } catch (err) {
       console.error("Signup error:", err);
-      metrics.authAttempts.inc({ action: "signup", result: "error" });
+      metrics.authAttempts("signup", "error");
       res
         .status(500)
         .json({ error: "Internal server error", code: "SERVER_ERROR" });
@@ -169,7 +172,7 @@ router.post("/verify", authLimiter, async (req, res) => {
       expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     });
 
-    metrics.authAttempts.inc({ action: "verify_login", result: "success" });
+    metrics.authAttempts("verify_login", "success");
 
     res.json({
       message: "Email verified successfully.",
@@ -212,7 +215,7 @@ router.post(
       const user = await db.getUserByEmail(email.toLowerCase());
       if (!user) {
         await recordFailure(req.ip, "failed_login");
-        metrics.authAttempts.inc({ action: "login", result: "failure" });
+        metrics.authAttempts("login", "failure");
         return res
           .status(401)
           .json({ error: "Invalid email or password", code: "AUTH_FAILED" });
@@ -222,7 +225,7 @@ router.post(
       const validPassword = await argon2.verify(user.password_hash, password);
       if (!validPassword) {
         await recordFailure(req.ip, "failed_login", user.id);
-        metrics.authAttempts.inc({ action: "login", result: "failure" });
+        metrics.authAttempts("login", "failure");
         return res
           .status(401)
           .json({ error: "Invalid email or password", code: "AUTH_FAILED" });
@@ -257,7 +260,7 @@ router.post(
       });
 
       resetFailures(req.ip, "failed_login");
-      metrics.authAttempts.inc({ action: "login", result: "success" });
+      metrics.authAttempts("login", "success");
 
       res.json({
         accessToken: tokens.accessToken,
@@ -274,7 +277,7 @@ router.post(
       });
     } catch (err) {
       console.error("Login error:", err);
-      metrics.authAttempts.inc({ action: "login", result: "error" });
+      metrics.authAttempts("login", "error");
       res
         .status(500)
         .json({ error: "Internal server error", code: "SERVER_ERROR" });

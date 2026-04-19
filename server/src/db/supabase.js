@@ -36,6 +36,10 @@ const memoryStore = {
   notifications: [],
   user_devices: [],
   notification_preferences: [],
+  worldVideoSessions: [],
+  worldVideoReports: [],
+  worldVideoBlocks: [],
+  worldVideoTos: [],
 };
 
 /**
@@ -1725,6 +1729,220 @@ const db = {
         !(n.deleted_at && n.deleted_at < cutoff) && !(n.created_at < cutoff),
     );
     return true;
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // World Video Chat
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ─── Session Logs ────────────────────────────────────────────────────
+  async createWorldVideoSession({ user1_id, user2_id, status, duration_seconds }) {
+    const { v4: uuidv4 } = require("uuid");
+    const id = uuidv4();
+    const now = new Date().toISOString();
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_sessions")
+        .insert({
+          id,
+          user1_id,
+          user2_id,
+          status: status || "completed",
+          duration_seconds: duration_seconds || null,
+          created_at: now,
+          ended_at: now,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    if (!memoryStore.worldVideoSessions) memoryStore.worldVideoSessions = [];
+    const session = {
+      id,
+      user1_id,
+      user2_id,
+      status: status || "completed",
+      duration_seconds: duration_seconds || null,
+      created_at: now,
+      ended_at: now,
+    };
+    memoryStore.worldVideoSessions.push(session);
+    return session;
+  },
+
+  // ─── Reports ──────────────────────────────────────────────────────────
+  async createWorldVideoReport({ session_id, reporter_id, reported_id, reason, metadata }) {
+    const { v4: uuidv4 } = require("uuid");
+    const id = uuidv4();
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_reports")
+        .insert({
+          id,
+          session_id,
+          reporter_id,
+          reported_id,
+          reason,
+          metadata: metadata || null,
+          status: "pending",
+        })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    if (!memoryStore.worldVideoReports) memoryStore.worldVideoReports = [];
+    const report = {
+      id,
+      session_id,
+      reporter_id,
+      reported_id,
+      reason,
+      metadata: metadata || null,
+      status: "pending",
+      reviewed_by: null,
+      reviewed_at: null,
+      created_at: new Date().toISOString(),
+    };
+    memoryStore.worldVideoReports.push(report);
+    return report;
+  },
+
+  async getWorldVideoReports({ status, limit = 50, offset = 0 }) {
+    if (supabase) {
+      let query = supabase
+        .from("world_video_reports")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+      if (status) query = query.eq("status", status);
+      const { data, error } = await query;
+      if (error) throw error;
+      return data || [];
+    }
+
+    let reports = memoryStore.worldVideoReports || [];
+    if (status) reports = reports.filter((r) => r.status === status);
+    return reports.slice(offset, offset + limit);
+  },
+
+  // ─── Blocklist ────────────────────────────────────────────────────────
+  async createWorldVideoBlock(userId, blockedUserId) {
+    const { v4: uuidv4 } = require("uuid");
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_blocks")
+        .upsert({
+          user_id: userId,
+          blocked_user_id: blockedUserId,
+        }, { onConflict: "user_id,blocked_user_id" })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    if (!memoryStore.worldVideoBlocks) memoryStore.worldVideoBlocks = [];
+    const existing = memoryStore.worldVideoBlocks.find(
+      (b) => b.user_id === userId && b.blocked_user_id === blockedUserId && !b.deleted_at,
+    );
+    if (existing) return existing;
+
+    const block = {
+      id: uuidv4(),
+      user_id: userId,
+      blocked_user_id: blockedUserId,
+      created_at: new Date().toISOString(),
+      deleted_at: null,
+    };
+    memoryStore.worldVideoBlocks.push(block);
+    return block;
+  },
+
+  async getWorldVideoBlockList(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_blocks")
+        .select("blocked_user_id, created_at")
+        .eq("user_id", userId)
+        .is("deleted_at", null);
+      if (error) throw error;
+      return data || [];
+    }
+
+    return (memoryStore.worldVideoBlocks || []).filter(
+      (b) => b.user_id === userId && !b.deleted_at,
+    );
+  },
+
+  async deleteWorldVideoBlock(userId, blockedUserId) {
+    if (supabase) {
+      const { error } = await supabase
+        .from("world_video_blocks")
+        .update({ deleted_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .eq("blocked_user_id", blockedUserId)
+        .is("deleted_at", null);
+      if (error) throw error;
+      return;
+    }
+
+    const block = (memoryStore.worldVideoBlocks || []).find(
+      (b) => b.user_id === userId && b.blocked_user_id === blockedUserId && !b.deleted_at,
+    );
+    if (block) block.deleted_at = new Date().toISOString();
+  },
+
+  // ─── Terms of Service Acceptance ──────────────────────────────────────
+  async getTosAcceptance(userId) {
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_tos_accepted")
+        .select("*")
+        .eq("user_id", userId)
+        .single();
+      if (error && error.code !== "PGRST116") throw error;
+      return data;
+    }
+
+    return (
+      (memoryStore.worldVideoTos || []).find((t) => t.user_id === userId) || null
+    );
+  },
+
+  async acceptWorldVideoTos(userId, version = "1.0") {
+    const now = new Date().toISOString();
+
+    if (supabase) {
+      const { data, error } = await supabase
+        .from("world_video_tos_accepted")
+        .upsert({
+          user_id: userId,
+          accepted_at: now,
+          version,
+        }, { onConflict: "user_id" })
+        .select()
+        .single();
+      if (error) throw error;
+      return data;
+    }
+
+    if (!memoryStore.worldVideoTos) memoryStore.worldVideoTos = [];
+    const existing = memoryStore.worldVideoTos.find((t) => t.user_id === userId);
+    if (existing) {
+      existing.version = version;
+      existing.accepted_at = now;
+      return existing;
+    }
+    const entry = { user_id: userId, accepted_at: now, version };
+    memoryStore.worldVideoTos.push(entry);
+    return entry;
   },
 };
 

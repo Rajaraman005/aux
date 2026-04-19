@@ -138,22 +138,54 @@ registerModerator("mime-type", async ({ mimeType, mediaType }) => {
 });
 
 // 3. Rate limiting (max uploads per user per hour)
-const uploadCounts = new Map(); // userId -> { count, resetAt }
+const uploadCounts = new Map();
 const MAX_UPLOADS_PER_HOUR = 50;
+const redisBridge = require("../signaling/redis");
 
 registerModerator("rate-limit", async ({ userId }) => {
   if (!userId) return { allowed: true, flags: [] };
 
-  const now = Date.now();
-  let entry = uploadCounts.get(userId);
-
-  if (!entry || now > entry.resetAt) {
-    entry = { count: 0, resetAt: now + 60 * 60 * 1000 };
-    uploadCounts.set(userId, entry);
+  if (redisBridge.isConnected) {
+    try {
+      const key = `upload_rate:${userId}`;
+      const count = await redisBridge.pub.incr(key);
+      if (count === 1) {
+        await redisBridge.pub.expire(key, 3600);
+      }
+      if (count > MAX_UPLOADS_PER_HOUR) {
+        return {
+          allowed: false,
+          reason: "Too many uploads. Try again later.",
+          flags: ["rate-limited"],
+        };
+      }
+      return { allowed: true, flags: [] };
+    } catch (err) {
+      console.error("Rate limit Redis error — failing closed:", err.message);
+      return {
+        allowed: false,
+        reason: "Service temporarily unavailable. Please try again.",
+        flags: ["rate-limit-error"],
+      };
+    }
   }
 
-  entry.count++;
+  if (process.env.NODE_ENV === "production") {
+    console.error("Rate limiter: No Redis in production — failing closed");
+    return {
+      allowed: false,
+      reason: "Service temporarily unavailable. Please try again.",
+      flags: ["rate-limit-error"],
+    };
+  }
 
+  const now = Date.now();
+  let entry = uploadCounts.get(userId);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + 3600000 };
+    uploadCounts.set(userId, entry);
+  }
+  entry.count++;
   if (entry.count > MAX_UPLOADS_PER_HOUR) {
     return {
       allowed: false,

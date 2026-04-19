@@ -1,9 +1,10 @@
 /**
- * MessageBubble — Memoized chat message bubble with media support.
+ * MessageBubble — Memoized chat message bubble with media and sender name support.
  *
  * Renders:
+ *   - Sender name header for other-user messages (hidden on consecutive same-sender)
  *   - Text-only messages
- *   - Image messages (with tap-to-fullscreen)
+ *   - Image messages (with tap-to-zoom via MediaViewer)
  *   - Video messages (thumbnail + play icon overlay)
  *   - Mixed messages (media + text caption)
  *   - Upload progress indicator for pending media
@@ -24,7 +25,6 @@ import { colors, spacing } from "../styles/theme";
 import MediaViewer from "./MediaViewer";
 import VoiceBubble from "./VoiceBubble";
 
-// ─── Constants ──────────────────────────────────────────────────────────────
 const MEDIA_MAX_WIDTH = 220;
 const MEDIA_MAX_HEIGHT = 280;
 
@@ -38,9 +38,6 @@ function formatMessageTime(dateStr) {
   });
 }
 
-/**
- * Calculate aspect-ratio-preserving dimensions.
- */
 function getMediaDimensions(width, height) {
   if (!width || !height) return { width: MEDIA_MAX_WIDTH, height: 160 };
   const aspect = width / height;
@@ -60,7 +57,7 @@ function formatDuration(seconds) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-function MessageBubble({ item, isMine }) {
+function MessageBubble({ item, isMine, showSenderName, senderName }) {
   const [viewerVisible, setViewerVisible] = useState(false);
   const hasMedia = !!item.media_url;
   const hasText = !!item.content;
@@ -80,6 +77,13 @@ function MessageBubble({ item, isMine }) {
         isMine ? styles.bubbleRowRight : styles.bubbleRowLeft,
       ]}
     >
+      {/* Sender name header for other-user messages */}
+      {showSenderName && senderName && !isMine && (
+        <Text style={styles.senderName} numberOfLines={1}>
+          {senderName}
+        </Text>
+      )}
+
       <View
         style={[
           styles.bubble,
@@ -87,7 +91,7 @@ function MessageBubble({ item, isMine }) {
           hasMedia && item.media_type !== "audio" && styles.bubbleMedia,
         ]}
       >
-        {/* ─── Media Content ──────────────────────────────────────── */}
+        {/* Media Content */}
         {hasMedia && item.media_type === "audio" ? (
           <VoiceBubble
             uri={item.media_url}
@@ -126,7 +130,6 @@ function MessageBubble({ item, isMine }) {
               onPress={openViewer}
               style={[styles.mediaContainer, mediaDims]}
             >
-              {/* Upload Progress Overlay */}
               {item.uploadProgress !== undefined && item.uploadProgress < 1 && (
                 <View style={styles.uploadOverlay}>
                   <ActivityIndicator size="small" color="#fff" />
@@ -136,7 +139,6 @@ function MessageBubble({ item, isMine }) {
                 </View>
               )}
 
-              {/* Image / Video Thumbnail */}
               <Image
                 source={{
                   uri:
@@ -150,7 +152,6 @@ function MessageBubble({ item, isMine }) {
                 placeholder={{ color: "#E0E0E0" }}
               />
 
-              {/* Video Play Button Overlay */}
               {isVideo && (
                 <View style={styles.playOverlay}>
                   <View style={styles.playButton}>
@@ -169,7 +170,7 @@ function MessageBubble({ item, isMine }) {
           )
         )}
 
-        {/* ─── Text Content ───────────────────────────────────────── */}
+        {/* Text Content */}
         {hasText && (
           <Text
             style={[
@@ -182,7 +183,7 @@ function MessageBubble({ item, isMine }) {
           </Text>
         )}
 
-        {/* ─── Footer (time + pending) ────────────────────────────── */}
+        {/* Footer (time + pending) */}
         {!(hasMedia && item.media_type === "audio") && (
           <View style={styles.bubbleFooter}>
             <Text style={[styles.bubbleTime, isMine && styles.bubbleTimeMine]}>
@@ -200,7 +201,7 @@ function MessageBubble({ item, isMine }) {
         )}
       </View>
 
-      {/* ─── Full-Screen Media Viewer ─────────────────────────────── */}
+      {/* Full-Screen Media Viewer with zoom */}
       {hasMedia && (
         <MediaViewer
           visible={viewerVisible}
@@ -208,6 +209,7 @@ function MessageBubble({ item, isMine }) {
           mediaUrl={item.media_url}
           mediaType={item.media_type}
           thumbnailUrl={item.media_thumbnail}
+          senderName={senderName}
           timestamp={item.created_at}
         />
       )}
@@ -215,7 +217,6 @@ function MessageBubble({ item, isMine }) {
   );
 }
 
-// ─── Memoization ────────────────────────────────────────────────────────────
 function areEqual(prevProps, nextProps) {
   const p = prevProps.item;
   const n = nextProps.item;
@@ -226,13 +227,14 @@ function areEqual(prevProps, nextProps) {
     p.content === n.content &&
     p.media_url === n.media_url &&
     p.uploadProgress === n.uploadProgress &&
-    prevProps.isMine === nextProps.isMine
+    prevProps.isMine === nextProps.isMine &&
+    prevProps.showSenderName === nextProps.showSenderName &&
+    prevProps.senderName === nextProps.senderName
   );
 }
 
 export default React.memo(MessageBubble, areEqual);
 
-// ─── Styles ─────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   bubbleRow: {
     marginBottom: 6,
@@ -242,6 +244,13 @@ const styles = StyleSheet.create({
   },
   bubbleRowLeft: {
     alignItems: "flex-start",
+  },
+  senderName: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: colors.textSecondary,
+    marginLeft: 4,
+    marginBottom: 2,
   },
   bubble: {
     maxWidth: "78%",
@@ -294,8 +303,6 @@ const styles = StyleSheet.create({
   pendingIcon: {
     marginLeft: 4,
   },
-
-  // Media
   mediaContainer: {
     borderRadius: 14,
     overflow: "hidden",
@@ -304,8 +311,6 @@ const styles = StyleSheet.create({
   mediaImage: {
     borderRadius: 14,
   },
-
-  // Upload Progress
   uploadOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(0,0,0,0.5)",
@@ -320,8 +325,6 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginTop: 4,
   },
-
-  // Video Overlay
   playOverlay: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: "center",

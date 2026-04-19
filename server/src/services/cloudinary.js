@@ -23,37 +23,81 @@ cloudinary.config({
   secure: true,
 });
 
+// ─── Structured Logger ──────────────────────────────────────────────────────
+const log = {
+  info: (msg, meta = {}) =>
+    console.log(JSON.stringify({ level: "info", msg, ts: new Date().toISOString(), ...meta })),
+  warn: (msg, meta = {}) =>
+    console.warn(JSON.stringify({ level: "warn", msg, ts: new Date().toISOString(), ...meta })),
+  error: (msg, meta = {}) =>
+    console.error(JSON.stringify({ level: "error", msg, ts: new Date().toISOString(), ...meta })),
+};
+
+// ─── Public ID Generation ──────────────────────────────────────────────────
+const PUBLIC_ID_MAX_LEN = 128;
+const PUBLIC_ID_REGEX = /^[a-zA-Z0-9_]+$/;
+
+function sanitizePublicId(id) {
+  const str = String(id ?? "").trim();
+  if (!str) return null;
+  return str.replace(/[^a-zA-Z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+}
+
+function generatePublicId(userId, mediaType) {
+  if (!userId || typeof userId !== "string") {
+    throw Object.assign(new Error("Invalid user ID for media upload"), { code: "INVALID_USER_ID" });
+  }
+
+  const sanitized = sanitizePublicId(userId);
+  if (!sanitized || !PUBLIC_ID_REGEX.test(sanitized)) {
+    throw Object.assign(new Error("Invalid user ID for media upload"), { code: "INVALID_USER_ID" });
+  }
+
+  const namespace = mediaType === "video" ? "v" : mediaType === "audio" ? "a" : "i";
+  const timestamp = Date.now().toString(36);
+  const uniqueId = crypto.randomBytes(8).toString("hex");
+
+  const publicId = `${namespace}_${sanitized}_${timestamp}_${uniqueId}`;
+
+  if (publicId.length > PUBLIC_ID_MAX_LEN) {
+    const truncated = sanitized.slice(0, 32);
+    const fallback = `${namespace}_${truncated}_${timestamp}_${uniqueId}`;
+    if (fallback.length > PUBLIC_ID_MAX_LEN || !PUBLIC_ID_REGEX.test(fallback)) {
+      throw Object.assign(new Error("Invalid public_id format"), { code: "INVALID_PUBLIC_ID" });
+    }
+    return fallback;
+  }
+
+  if (!PUBLIC_ID_REGEX.test(publicId)) {
+    throw Object.assign(new Error("Invalid public_id format"), { code: "INVALID_PUBLIC_ID" });
+  }
+
+  return publicId;
+}
+
 // ─── Avatar Upload (Existing — Server-Side) ─────────────────────────────────
 
-/**
- * Upload an avatar image to Cloudinary.
- * Server-side upload (avatars are small, <2MB).
- */
 async function uploadAvatar(fileBuffer, userId) {
+  const sanitized = sanitizePublicId(userId);
+  if (!sanitized) {
+    throw Object.assign(new Error("Invalid user ID for avatar upload"), { code: "INVALID_USER_ID" });
+  }
+
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder: "aux/avatars",
-        public_id: userId,
+        public_id: sanitized,
         overwrite: true,
         invalidate: true,
         resource_type: "image",
-        transformation: [
-          {
-            width: 400,
-            height: 400,
-            crop: "fill",
-            gravity: "face",
-            quality: "auto:good",
-            fetch_format: "auto",
-          },
-        ],
       },
       (error, result) => {
         if (error) {
-          console.error("Cloudinary upload error:", error);
+          log.error("Cloudinary avatar upload error", { userId: sanitized, err: error.message });
           return reject(error);
         }
+        log.info("Avatar uploaded", { publicId: result.public_id });
         resolve({
           url: result.secure_url,
           publicId: result.public_id,
@@ -65,64 +109,71 @@ async function uploadAvatar(fileBuffer, userId) {
   });
 }
 
-/**
- * Delete an avatar from Cloudinary.
- */
 async function deleteAvatar(userId) {
+  const sanitized = sanitizePublicId(userId);
+  if (!sanitized) return;
   try {
-    await cloudinary.uploader.destroy(`aux/avatars/${userId}`, {
+    await cloudinary.uploader.destroy(`aux/avatars/${sanitized}`, {
       invalidate: true,
     });
+    log.info("Avatar deleted", { userId: sanitized });
   } catch (err) {
-    console.error("Cloudinary delete error:", err);
+    log.error("Cloudinary delete error", { userId: sanitized, err: err.message });
   }
 }
 
 // ─── Signed Direct Upload (Client-Side) ─────────────────────────────────────
 
-/**
- * Generate signed upload parameters for DIRECT client → Cloudinary upload.
- * Server never touches the file. Zero memory, zero bandwidth cost.
- *
- * @param {string} userId - Authenticated user ID
- * @param {string} mediaType - 'image' | 'video'
- * @returns {{ cloudName, apiKey, timestamp, signature, folder, publicId, eager, uploadUrl }}
- */
-function generateSignedUpload(userId, mediaType) {
-  const timestamp = Math.round(Date.now() / 1000);
-  const uniqueId = crypto.randomBytes(8).toString("hex");
-  const folder = "aux/chat-media";
-  const publicId = `${userId}_${timestamp}_${uniqueId}`;
+// ★ Verified 2026-04-14: Cloudinary signed direct upload limit.
+// Update this constant if the Cloudinary plan changes.
+const MAX_SIZE = {
+  image: 10 * 1024 * 1024,
+  video: 100 * 1024 * 1024,
+  audio: 5 * 1024 * 1024,
+};
 
-  // Build params to sign
+const RESOURCE_TYPE_MAP = { image: "image", video: "video", audio: "video" };
+
+function generateSignedUpload(userId, mediaType) {
+  if (!process.env.CLOUDINARY_API_SECRET) {
+    throw Object.assign(new Error("Cloudinary not configured"), { code: "CONFIG_ERROR" });
+  }
+
+  const publicId = generatePublicId(userId, mediaType);
+  const timestamp = Math.round(Date.now() / 1000);
+  const folder = "aux/chat-media";
+  const maxFileSize = MAX_SIZE[mediaType] || MAX_SIZE.image;
+
+  // ★ max_file_size is NOT a valid Cloudinary signed upload parameter.
+  // Including it in paramsToSign causes signature mismatch — Cloudinary's
+  // verification excludes it from the string-to-sign, breaking the hash.
+  // Size limits are enforced client-side (compressionService size gate)
+  // and server-side (moderation fileSize check).
   const paramsToSign = {
     timestamp,
     folder,
     public_id: publicId,
   };
 
-  // Image-specific transformations
   if (mediaType === "image") {
     paramsToSign.transformation = "c_limit,w_1920,h_1920,q_auto:good,f_auto";
-    paramsToSign.eager = "c_fill,w_200,h_200,q_auto:low,f_auto"; // thumbnail
+    paramsToSign.eager = "c_fill,w_200,h_200,q_auto:low,f_auto";
   }
 
-  // Video-specific transformations
   if (mediaType === "video") {
-    paramsToSign.eager = "c_fill,w_320,h_320,q_auto:low,f_jpg,so_0"; // video thumbnail (first frame)
+    paramsToSign.eager = "c_fill,w_320,h_320,q_auto:low,f_jpg,so_0";
     paramsToSign.eager_async = "true";
   }
 
-  // Audio — Cloudinary stores audio under resource_type "video" (so no eager transformations)
-  if (mediaType === "audio") {
-    // No extras for audio
-  }
-
-  // Generate signature
   const signature = cloudinary.utils.api_sign_request(
     paramsToSign,
     process.env.CLOUDINARY_API_SECRET,
   );
+
+  const resourceType = RESOURCE_TYPE_MAP[mediaType] || "image";
+  const uploadUrl = `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/${resourceType}/upload`;
+
+  log.info("Signed upload generated", { userId, mediaType, publicId, maxFileSize });
 
   return {
     cloudName: process.env.CLOUDINARY_CLOUD_NAME,
@@ -131,19 +182,13 @@ function generateSignedUpload(userId, mediaType) {
     signature,
     folder,
     publicId,
-    resourceType: mediaType === "image" ? "image" : "video",
-    transformation:
-      mediaType === "image"
-        ? "c_limit,w_1920,h_1920,q_auto:good,f_auto"
-        : undefined,
-    eager:
-      mediaType === "image"
-        ? "c_fill,w_200,h_200,q_auto:low,f_auto"
-        : mediaType === "video"
-          ? "c_fill,w_320,h_320,q_auto:low,f_jpg,so_0"
-          : undefined,
-    eagerAsync: mediaType === "video",
-    uploadUrl: `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/${mediaType === "image" ? "image" : "video"}/upload`,
+    maxFileSize,
+    expiresAt: timestamp + 3600,
+    resourceType,
+    transformation: mediaType === "image" ? paramsToSign.transformation : undefined,
+    eager: paramsToSign.eager,
+    eagerAsync: mediaType === "video" ? "true" : undefined,
+    uploadUrl,
   };
 }
 
@@ -157,10 +202,12 @@ function generateSignedUpload(userId, mediaType) {
 function isValidCloudinaryUrl(url) {
   if (!url || typeof url !== "string") return false;
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  return (
-    url.startsWith(`https://res.cloudinary.com/${cloudName}/`) ||
-    url.startsWith(`https://res.cloudinary.com/${cloudName}/`)
-  );
+  const prefix = `https://res.cloudinary.com/${cloudName}/`;
+  return url.startsWith(prefix) && url.length > prefix.length + 10;
+}
+
+function isSignatureExpired(timestamp) {
+  return Date.now() / 1000 - timestamp > 3600;
 }
 
 /**
@@ -184,6 +231,10 @@ module.exports = {
   uploadAvatar,
   deleteAvatar,
   generateSignedUpload,
+  generatePublicId,
   isValidCloudinaryUrl,
+  isSignatureExpired,
   getThumbnailUrl,
+  sanitizePublicId,
+  log,
 };

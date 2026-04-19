@@ -11,10 +11,12 @@
  *   - pickType: 'image' | 'video'
  *   - pickSource: 'gallery' | 'camera'
  *   - conversationId: string
+ *   - preselectedAssets: (optional) already-picked assets from ChatScreen
  *
  * Emits DeviceEventEmitter "media-preview-send" on send.
+ * NO function params — avoids React Navigation non-serializable warning.
  */
-import React, { useState, useRef, useCallback, useEffect } from "react";
+import React, { useState, useRef, useCallback, useEffect, memo } from "react";
 import {
   View,
   Text,
@@ -49,7 +51,6 @@ async function openPicker(type, source) {
     const result = await ImagePicker.launchCameraAsync({
       mediaTypes,
       allowsEditing: false,
-      quality: 0.8,
       videoMaxDuration: 60,
     });
     if (result.canceled || !result.assets?.length) return null;
@@ -61,7 +62,6 @@ async function openPicker(type, source) {
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes,
     allowsEditing: false,
-    quality: 0.8,
     videoMaxDuration: 60,
   });
   if (result.canceled || !result.assets?.length) return null;
@@ -119,14 +119,20 @@ export default function MediaPreviewScreen({ route, navigation }) {
     setIsPickerOpen(true); // Indicate picker is opening
 
     (async () => {
-      const picked = await openPicker(pickType, pickSource);
-      setIsPickerOpen(false); // Picker has closed
-      if (!picked || picked.length === 0) {
-        // User cancelled the picker → go back
+      try {
+        const picked = await openPicker(pickType, pickSource);
+        if (!picked || picked.length === 0) {
+          // User cancelled the picker → go back
+          navigation.goBack();
+          return;
+        }
+        setAssets(normalizeAssets(picked));
+      } catch (err) {
+        console.error("openPicker error", err);
         navigation.goBack();
-        return;
+      } finally {
+        setIsPickerOpen(false); // Picker has closed
       }
-      setAssets(normalizeAssets(picked));
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -139,7 +145,6 @@ export default function MediaPreviewScreen({ route, navigation }) {
       mediaTypes: ["images", "videos"],
       allowsMultipleSelection: true,
       selectionLimit: 10 - assets.length,
-      quality: 0.8,
     });
     if (result.canceled || !result.assets?.length) return;
     setAssets((prev) => [...prev, ...normalizeAssets(result.assets)]);
@@ -159,31 +164,46 @@ export default function MediaPreviewScreen({ route, navigation }) {
   // ─── Crop / Edit ──────────────────────────────────────────────────
   const handleCrop = useCallback(() => {
     if (!activeAsset || isVideo) return;
-    navigation.navigate("ImageEditor", {
-      imageUri: activeAsset.uri,
-      onComplete: (editedUri) => {
+    // Use DeviceEventEmitter for image editor results (avoids non-serializable function in params)
+    const editorSubscription = DeviceEventEmitter.addListener(
+      "image-editor-complete",
+      ({ uri }) => {
+        editorSubscription.remove();
         setAssets((prev) =>
           prev.map((a, i) =>
-            i === activeIndex ? { ...a, uri: editedUri } : a,
+            i === activeIndex ? { ...a, uri } : a,
           ),
         );
       },
+    );
+    navigation.navigate("ImageEditor", {
+      imageUri: activeAsset.uri,
+      conversationId,
     });
-  }, [activeAsset, activeIndex, isVideo, navigation]);
+  }, [activeAsset, activeIndex, isVideo, navigation, conversationId]);
 
   // ─── Send ─────────────────────────────────────────────────────────
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     if (isSending || !assets.length) return;
     setIsSending(true);
+
+    // Small delay to allow UI to show loading state
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Always use DeviceEventEmitter (no non-serializable function in route params)
     DeviceEventEmitter.emit("media-preview-send", {
       targetConversationId: conversationId,
       mediaAssets: assets,
       caption: caption.trim(),
     });
-    navigation.goBack();
+
+    // Navigate back after a brief delay to ensure event is emitted
+    setTimeout(() => {
+      navigation.goBack();
+    }, 50);
   }, [assets, caption, isSending, navigation, conversationId]);
 
-  // ─── Thumbnail item ───────────────────────────────────────────────
+  // ─── Thumbnail render (optimized with memo) ─────────────────────
   const renderThumbnail = useCallback(
     ({ item, index }) => {
       const isActive = index === activeIndex;
@@ -197,6 +217,9 @@ export default function MediaPreviewScreen({ route, navigation }) {
             source={{ uri: item.uri }}
             style={styles.thumbnailImg}
             contentFit="cover"
+            cachePolicy="memory-disk"
+            priority={isActive ? "high" : "low"}
+            transition={200}
           />
           {item.type === "video" && (
             <View style={styles.thumbnailVideoIcon}>
@@ -213,11 +236,11 @@ export default function MediaPreviewScreen({ route, navigation }) {
   // ─── Loading state while picker is open ───────────────────────────
   if (isPickerOpen || assets.length === 0) {
     return (
-      <View style={[styles.container, styles.loadingContainer]}>
+      <View style={styles.loadingContainer}>
         <StatusBar
           barStyle="light-content"
           backgroundColor="#000"
-          translucent={false}
+          translucent
         />
         <ActivityIndicator size="large" color="rgba(255,255,255,0.5)" />
       </View>
@@ -228,9 +251,42 @@ export default function MediaPreviewScreen({ route, navigation }) {
     <View style={styles.container}>
       <StatusBar
         barStyle="light-content"
-        backgroundColor="#000"
-        translucent={false}
+        backgroundColor="transparent"
+        translucent
       />
+
+      {/* ─── Media Layer (Full Screen) ─────────────────────────── */}
+      <View style={styles.mediaContainer}>
+        {isVideo ? (
+          <Video
+            key={`video_${activeAsset.uri}`}
+            ref={videoRef}
+            source={{ uri: activeAsset.uri }}
+            style={StyleSheet.absoluteFill}
+            resizeMode={ResizeMode.CONTAIN}
+            shouldPlay={false}
+            isLooping={false}
+            isMuted={true}
+            useNativeControls={true}
+            onLoad={() => {
+              // Auto-play once loaded for better UX
+              if (videoRef.current) {
+                videoRef.current.playAsync();
+              }
+            }}
+          />
+        ) : (
+          <Image
+            key={`img_${activeAsset.uri}`}
+            source={{ uri: activeAsset.uri }}
+            style={StyleSheet.absoluteFill}
+            contentFit="contain"
+            transition={200}
+            cachePolicy="memory-disk"
+            priority="high"
+          />
+        )}
+      </View>
 
       {/* ─── Top Bar ─────────────────────────────────────────────── */}
       <Animated.View
@@ -268,34 +324,13 @@ export default function MediaPreviewScreen({ route, navigation }) {
         </View>
       </Animated.View>
 
-      {/* ─── Main Preview ────────────────────────────────────────── */}
+      {/* ─── Main Preview UI Overlay ────────────────────────────── */}
       <Animated.View
         entering={FadeIn.duration(250)}
         style={[styles.previewArea, bottomAnimStyle]}
+        pointerEvents="box-none"
       >
-        <View style={styles.mediaContainer}>
-          {isVideo ? (
-            <Video
-              key={activeAsset.uri}
-              ref={videoRef}
-              source={{ uri: activeAsset.uri }}
-              style={StyleSheet.absoluteFill}
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay
-              isLooping
-              isMuted={false}
-              useNativeControls
-            />
-          ) : (
-            <Image
-              key={activeAsset.uri}
-              source={{ uri: activeAsset.uri }}
-              style={StyleSheet.absoluteFill}
-              contentFit="contain"
-              transition={150}
-            />
-          )}
-        </View>
+        <View style={{ flex: 1 }} pointerEvents="none" />
 
         {/* Media count badge */}
         {assets.length > 1 && (
@@ -315,10 +350,15 @@ export default function MediaPreviewScreen({ route, navigation }) {
             <FlatList
               data={assets}
               renderItem={renderThumbnail}
-              keyExtractor={(_, i) => `thumb_${i}`}
+              keyExtractor={(_, i) => `thumb_${i}_${assets.length}`}
               horizontal
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.thumbnailList}
+              windowSize={5}
+              maxToRenderPerBatch={10}
+              initialNumToRender={10}
+              updateCellsBatchingPeriod={50}
+              removeClippedSubviews={Platform.OS === "android"}
             />
           </Animated.View>
         )}
@@ -381,10 +421,16 @@ const styles = StyleSheet.create({
     backgroundColor: "#000",
   },
   loadingContainer: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: "center",
     alignItems: "center",
+    backgroundColor: "#000",
   },
   topBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
@@ -407,10 +453,11 @@ const styles = StyleSheet.create({
   },
   previewArea: {
     flex: 1,
-    justifyContent: "space-between",
+    justifyContent: "flex-end",
+    zIndex: 5,
   },
   mediaContainer: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: "#000",
   },
   countBadge: {

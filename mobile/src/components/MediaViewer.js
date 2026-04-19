@@ -1,12 +1,11 @@
 /**
- * MediaViewer — Full-screen media viewer with gestures.
+ * MediaViewer — Full-screen media viewer with zoom support.
  *
- * Features:
- *   - Full-screen image display with pinch-to-zoom
- *   - Full-screen video playback with controls
- *   - Tap background to dismiss
- *   - Animated fade in/out transitions
- *   - Header with close button and media info
+ * Delegates image zoom/pan/tap to ZoomableImage component.
+ * Handles: Modal lifecycle, header, video playback, safe areas.
+ *
+ * GestureHandlerRootView is inside the Modal for Android compatibility.
+ * ZoomableImage does NOT include its own GestureHandlerRootView.
  */
 import React, { useState, useRef, useCallback } from "react";
 import {
@@ -16,13 +15,13 @@ import {
   StyleSheet,
   Modal,
   Dimensions,
-  StatusBar,
   ActivityIndicator,
 } from "react-native";
-import { Image } from "expo-image";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Icon from "react-native-vector-icons/Feather";
 import { Video, ResizeMode } from "expo-av";
+import ZoomableImage from "./ZoomableImage";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -42,13 +41,9 @@ export default function MediaViewer({
 
   const handleImageLoad = useCallback(() => setIsLoading(false), []);
 
-  const formatDuration = (ms) => {
-    if (!ms) return "0:00";
-    const totalSeconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
-  };
+  const handleModalShow = useCallback(() => {
+    setIsLoading(true);
+  }, []);
 
   const togglePlayback = useCallback(async () => {
     if (!videoRef.current) return;
@@ -59,6 +54,14 @@ export default function MediaViewer({
     }
   }, [videoStatus.isPlaying]);
 
+  const formatDuration = (ms) => {
+    if (!ms) return "0:00";
+    const totalSeconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  };
+
   return (
     <Modal
       visible={visible}
@@ -66,80 +69,88 @@ export default function MediaViewer({
       animationType="fade"
       onRequestClose={onClose}
       statusBarTranslucent
+      onShow={handleModalShow}
     >
-      <StatusBar backgroundColor="rgba(0,0,0,0.95)" barStyle="light-content" />
-      <View style={styles.container}>
-        {/* Header */}
-        <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-          <TouchableOpacity
-            onPress={onClose}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Icon name="x" size={24} color="#fff" />
-          </TouchableOpacity>
-          <View style={styles.headerInfo}>
-            {senderName && <Text style={styles.headerName}>{senderName}</Text>}
-            {timestamp && (
-              <Text style={styles.headerTime}>
-                {new Date(timestamp).toLocaleString()}
-              </Text>
+      <GestureHandlerRootView style={styles.container}>
+        <View style={styles.container}>
+          {/* ─── Media Layer (Full Screen) ─────────────────────────── */}
+          <View style={StyleSheet.absoluteFill}>
+            {mediaType === "video" ? (
+              <View style={styles.fullScreenMedia}>
+                {isLoading && (
+                  <View style={styles.loader}>
+                    <ActivityIndicator size="large" color="#fff" />
+                  </View>
+                )}
+                <TouchableOpacity
+                  activeOpacity={1}
+                  onPress={togglePlayback}
+                  style={StyleSheet.absoluteFill}
+                >
+                  <Video
+                    ref={videoRef}
+                    source={{ uri: mediaUrl }}
+                    style={StyleSheet.absoluteFill}
+                    resizeMode={ResizeMode.CONTAIN}
+                    shouldPlay
+                    useNativeControls
+                    onPlaybackStatusUpdate={setVideoStatus}
+                    onLoad={() => setIsLoading(false)}
+                    posterSource={thumbnailUrl ? { uri: thumbnailUrl } : undefined}
+                    usePoster={!!thumbnailUrl}
+                  />
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.fullScreenMedia}>
+                {isLoading && (
+                  <View style={styles.loader}>
+                    <ActivityIndicator size="large" color="#fff" />
+                  </View>
+                )}
+                <ZoomableImage
+                  uri={mediaUrl}
+                  onDismiss={onClose}
+                  onLoad={handleImageLoad}
+                />
+              </View>
+            )}
+          </View>
+
+          {/* ─── UI Overlay ────────────────────────────────────────── */}
+          <View style={styles.overlay} pointerEvents="box-none">
+            {/* Header */}
+            <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+              <TouchableOpacity
+                onPress={onClose}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                accessibilityLabel="Close viewer"
+                accessibilityRole="button"
+              >
+                <Icon name="x" size={24} color="#fff" />
+              </TouchableOpacity>
+              <View style={styles.headerInfo}>
+                {senderName && <Text style={styles.headerName}>{senderName}</Text>}
+                {timestamp && (
+                  <Text style={styles.headerTime}>
+                    {new Date(timestamp).toLocaleString()}
+                  </Text>
+                )}
+              </View>
+            </View>
+
+            {/* Video Progress */}
+            {mediaType === "video" && videoStatus.durationMillis > 0 && (
+              <View style={[styles.videoInfo, { paddingBottom: insets.bottom + 8 }]}>
+                <Text style={styles.videoTime}>
+                  {formatDuration(videoStatus.positionMillis)} /{" "}
+                  {formatDuration(videoStatus.durationMillis)}
+                </Text>
+              </View>
             )}
           </View>
         </View>
-
-        {/* Media Content */}
-        <View style={styles.mediaContainer}>
-          {isLoading && mediaType !== "video" && (
-            <ActivityIndicator
-              size="large"
-              color="#fff"
-              style={styles.loader}
-            />
-          )}
-
-          {mediaType === "video" ? (
-            <TouchableOpacity
-              activeOpacity={1}
-              onPress={togglePlayback}
-              style={styles.videoWrapper}
-            >
-              <Video
-                ref={videoRef}
-                source={{ uri: mediaUrl }}
-                style={styles.video}
-                resizeMode={ResizeMode.CONTAIN}
-                shouldPlay
-                useNativeControls
-                onPlaybackStatusUpdate={setVideoStatus}
-                onLoad={() => setIsLoading(false)}
-                posterSource={thumbnailUrl ? { uri: thumbnailUrl } : undefined}
-                usePoster={!!thumbnailUrl}
-              />
-            </TouchableOpacity>
-          ) : (
-            <Image
-              source={{ uri: mediaUrl }}
-              style={styles.image}
-              contentFit="contain"
-              transition={200}
-              placeholder={{ color: "#1a1a1a" }}
-              onLoad={handleImageLoad}
-            />
-          )}
-        </View>
-
-        {/* Video Progress Bar */}
-        {mediaType === "video" && videoStatus.durationMillis > 0 && (
-          <View
-            style={[styles.videoInfo, { paddingBottom: insets.bottom + 8 }]}
-          >
-            <Text style={styles.videoTime}>
-              {formatDuration(videoStatus.positionMillis)} /{" "}
-              {formatDuration(videoStatus.durationMillis)}
-            </Text>
-          </View>
-        )}
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }
@@ -149,12 +160,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "rgba(0, 0, 0, 0.95)",
   },
+  overlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "space-between",
+    zIndex: 10,
+  },
   header: {
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,
     paddingBottom: 12,
-    zIndex: 10,
   },
   headerInfo: {
     flex: 1,
@@ -170,26 +185,15 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
-  mediaContainer: {
+  fullScreenMedia: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
+    width: "100%",
   },
   loader: {
-    position: "absolute",
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "center",
+    alignItems: "center",
     zIndex: 5,
-  },
-  image: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.75,
-  },
-  videoWrapper: {
-    width: SCREEN_WIDTH,
-    height: SCREEN_HEIGHT * 0.75,
-  },
-  video: {
-    width: "100%",
-    height: "100%",
   },
   videoInfo: {
     alignItems: "center",

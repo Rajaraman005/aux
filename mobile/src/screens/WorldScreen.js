@@ -21,6 +21,7 @@ import {
   StatusBar,
   Alert,
   Modal,
+  DeviceEventEmitter,
 } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -37,12 +38,12 @@ import signalingClient from "../services/socket";
 import { colors, typography, spacing, radius, shadows } from "../styles/theme";
 import TypingBubble from "../components/TypingBubble";
 import MediaViewer from "../components/MediaViewer";
+import * as ImagePicker from "expo-image-picker";
 import {
-  pickImage,
-  pickVideo,
   uploadMedia,
   cancelUpload,
 } from "../services/mediaService";
+import { useUploadQueue } from "../context/UploadContext";
 import {
   startRecording,
   stopRecording,
@@ -50,6 +51,7 @@ import {
   cancelRecording,
 } from "../services/voiceRecorder";
 import VoiceBubble from "../components/VoiceBubble";
+import RandomVideoScreen from "./RandomVideoScreen";
 
 const AVATAR_BASE = "https://api.dicebear.com/7.x/initials/png?seed=";
 const NEAR_BOTTOM_THRESHOLD = 150;
@@ -101,10 +103,12 @@ export default function WorldScreen({ navigation }) {
   const [inputText, setInputText] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
+  const { isAnyUploading } = useUploadQueue();
   const [viewerMedia, setViewerMedia] = useState(null);
   const [isTyping, setIsTyping] = useState(false);
   const [typingUserName, setTypingUserName] = useState("");
+  const [viewMode, setViewMode] = useState("chat"); // 'chat' or 'video'
+  const [isVideoActive, setIsVideoActive] = useState(false);
 
   // Voice recording state
   const [isRecordingAudio, setIsRecordingAudio] = useState(false);
@@ -116,10 +120,19 @@ export default function WorldScreen({ navigation }) {
   const isNearBottomRef = useRef(true);
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef(0);
+  const isMountedRef = useRef(true);
+  const isSendingRef = useRef(new Set());
 
   useEffect(() => {
     isNearBottomRef.current = isNearBottom;
   }, [isNearBottom]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // ─── Load history ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -212,39 +225,82 @@ export default function WorldScreen({ navigation }) {
     [inputText, user],
   );
 
-  // ─── Media Pick & Upload ───────────────────────────────────────────
+  // ─── Media Pick → Navigate to preview screen ──────────────────────
   const handleMediaPick = useCallback(
     async (type, source) => {
       setShowAttachMenu(false);
+
+      const mediaTypes = type === "video" ? ["videos"] : ["images"];
+      let result;
       try {
-        const asset =
-          type === "video" ? await pickVideo(source) : await pickImage(source);
-        if (!asset) return;
+        if (source === "camera") {
+          const { status } = await ImagePicker.requestCameraPermissionsAsync();
+          if (status !== "granted") return;
+          result = await ImagePicker.launchCameraAsync({
+            mediaTypes,
+            allowsEditing: false,
+            videoMaxDuration: 60,
+          });
+        } else {
+          const { status } =
+            await ImagePicker.requestMediaLibraryPermissionsAsync();
+          if (status !== "granted") return;
+          result = await ImagePicker.launchImageLibraryAsync({
+            mediaTypes,
+            allowsEditing: false,
+            videoMaxDuration: 60,
+          });
+        }
+      } catch {
+        return;
+      }
 
-        setIsUploading(true);
-        const uploadId = `world_${Date.now()}`;
-        const tempId = generateTempId();
+      if (result?.canceled || !result?.assets?.length) return;
 
-        const optimistic = {
-          tempId,
-          sender_id: user.id,
-          sender_name: user.name,
-          sender_avatar: user.avatar_seed || user.name,
-          content: null,
-          created_at: new Date().toISOString(),
-          pending: true,
-          media_url: asset.uri,
-          media_type: type === "video" ? "video" : "image",
-          media_width: asset.width,
-          media_height: asset.height,
-          media_duration: asset.duration,
-          uploadProgress: 0,
-        };
-        setMessages((prev) => [optimistic, ...prev]);
+      // Navigate to preview — NO function in route.params (avoids non-serializable warning)
+      // MediaPreviewScreen will emit DeviceEventEmitter which we listen for below
+      navigation.navigate("MediaPreview", {
+        preselectedAssets: result.assets,
+        conversationId: "world",
+      });
+    },
+    [navigation],
+  );
 
+  // ─── Upload a single media item and send via WS ────────────────────
+  const uploadAndSendMedia = useCallback(
+    async (asset, captionText) => {
+      const mediaType = asset.type === "video" ? "video" : "image";
+      const uploadId = `world_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      const tempId = generateTempId();
+
+      // Deduplication guard
+      if (isSendingRef.current.has(tempId)) return;
+      isSendingRef.current.add(tempId);
+
+      const optimistic = {
+        tempId,
+        sender_id: user.id,
+        sender_name: user.name,
+        sender_avatar: user.avatar_seed || user.name,
+        content: captionText || null,
+        created_at: new Date().toISOString(),
+        pending: true,
+        media_url: asset.uri,
+        media_type: mediaType,
+        media_width: asset.width,
+        media_height: asset.height,
+        media_duration: asset.duration,
+        uploadProgress: 0,
+      };
+
+      if (!isMountedRef.current) return;
+      setMessages((prev) => [optimistic, ...prev]);
+
+      try {
         const result = await uploadMedia({
           uri: asset.uri,
-          mediaType: type === "video" ? "video" : "image",
+          mediaType,
           fileSize: asset.fileSize,
           mimeType: asset.mimeType,
           width: asset.width,
@@ -252,6 +308,7 @@ export default function WorldScreen({ navigation }) {
           duration: asset.duration,
           uploadId,
           onProgress: (p) => {
+            if (!isMountedRef.current) return;
             setMessages((prev) =>
               prev.map((m) =>
                 m.tempId === tempId ? { ...m, uploadProgress: p } : m,
@@ -262,7 +319,7 @@ export default function WorldScreen({ navigation }) {
 
         const media = {
           url: result.url,
-          mediaType: type === "video" ? "video" : "image",
+          mediaType,
           thumbnailUrl: result.thumbnailUrl,
           width: result.width,
           height: result.height,
@@ -271,6 +328,7 @@ export default function WorldScreen({ navigation }) {
           mimeType: result.mimeType,
         };
 
+        if (!isMountedRef.current) return;
         setMessages((prev) =>
           prev.map((m) =>
             m.tempId === tempId
@@ -284,9 +342,14 @@ export default function WorldScreen({ navigation }) {
           ),
         );
 
-        signalingClient.sendWorldMessage(null, tempId, media);
+        signalingClient.sendWorldMessage(
+          captionText || null,
+          tempId,
+          media,
+        );
       } catch (err) {
         if (err.message !== "Upload cancelled") {
+          if (!isMountedRef.current) return;
           Alert.alert("Upload Failed", err.message || "Failed to send media");
           setMessages((prev) =>
             prev.filter(
@@ -295,11 +358,30 @@ export default function WorldScreen({ navigation }) {
           );
         }
       } finally {
-        setIsUploading(false);
+        isSendingRef.current.delete(tempId);
       }
     },
     [user],
   );
+
+  // ─── Listen for media send events from MediaPreviewScreen ──────────
+  // DeviceEventEmitter is the sole communication channel (no non-serializable params)
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener(
+      "media-preview-send",
+      ({ targetConversationId, mediaAssets, caption }) => {
+        if (targetConversationId !== "world") return;
+        const uploads = mediaAssets.map((item, idx) => {
+          const text = idx === 0 ? (caption || "") : "";
+          return uploadAndSendMedia(item, text);
+        });
+        Promise.all(uploads).catch((err) =>
+          console.error("Parallel upload error:", err),
+        );
+      },
+    );
+    return () => sub.remove();
+  }, [uploadAndSendMedia]);
 
   // ─── Voice Recording ───────────────────────────────────────────────
   const handleRecordStart = async () => {
@@ -417,7 +499,7 @@ export default function WorldScreen({ navigation }) {
           )}
 
           <View style={[styles.bubbleCol, isMine && styles.bubbleColMine]}>
-            {showAvatar && !isMine && (
+            {showAvatar && !isMine && !item.media_url && (
               <Text style={styles.senderName}>{item.sender_name}</Text>
             )}
             <View
@@ -508,33 +590,61 @@ export default function WorldScreen({ navigation }) {
   return (
     <View style={styles.container}>
       <StatusBar
-        barStyle="dark-content"
-        backgroundColor={colors.bg}
-        translucent={false}
+        barStyle={viewMode === "video" && isVideoActive ? "light-content" : "dark-content"}
+        backgroundColor={Platform.OS === "ios" ? colors.bg : "transparent"}
+        translucent
       />
-      <View style={[styles.statusBarSpacer, { height: insets.top }]} />
+      {!(viewMode === "video" && isVideoActive) && (
+        <>
+          <View style={[styles.statusBarSpacer, { height: insets.top }]} />
 
-      {/* ─── Header ────────────────────────────────────────────────── */}
-      <View style={styles.header}>
-        <View style={styles.headerRow}>
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            style={styles.backButton}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <Icon name="arrow-left" size={24} color={colors.textPrimary} />
-          </TouchableOpacity>
-          <View style={styles.headerCenter}>
-            <Text style={styles.title}>World</Text>
-            <Text style={styles.subtitle}>Everyone can see this</Text>
+          {/* ─── Header ────────────────────────────────────────────────── */}
+          <View style={styles.header}>
+            <View style={styles.headerRow}>
+              <TouchableOpacity
+                onPress={() => navigation.goBack()}
+                style={styles.backButton}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <Icon name="arrow-left" size={24} color={colors.textPrimary} />
+              </TouchableOpacity>
+              <View style={styles.headerCenter}>
+                <Text style={styles.title}>World</Text>
+                <Text style={styles.subtitle}>Everyone can see this</Text>
+              </View>
+            </View>
+
+            {/* ─── Chat/Video Toggle ────────────────────────────────────────── */}
+            <View style={styles.toggleContainer}>
+              <TouchableOpacity
+                style={[styles.toggleButton, viewMode === "chat" && styles.toggleButtonActive]}
+                onPress={() => setViewMode("chat")}
+              >
+                <Icon name="message-circle" size={16} color={viewMode === "chat" ? "#fff" : colors.textMuted} />
+                <Text style={[styles.toggleText, viewMode === "chat" && styles.toggleTextActive]}>Chat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.toggleButton, viewMode === "video" && styles.toggleButtonActive]}
+                onPress={() => setViewMode("video")}
+              >
+                <Icon name="video" size={16} color={viewMode === "video" ? "#fff" : colors.textMuted} />
+                <Text style={[styles.toggleText, viewMode === "video" && styles.toggleTextActive]}>Video</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </View>
+        </>
+      )}
 
       {/* ─── Clip container — prevents content overflowing above header */}
       <View style={styles.contentClip}>
         <Animated.View style={[styles.flex1, translateStyle]}>
-          {isLoading ? (
+          {viewMode === "video" ? (
+            <RandomVideoScreen 
+              navigation={navigation} 
+              onActiveChange={setIsVideoActive} 
+              onBack={() => setViewMode("chat")} 
+            />
+          ) : isLoading ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator size="large" color={colors.primary} />
             </View>
@@ -575,10 +685,11 @@ export default function WorldScreen({ navigation }) {
           )}
 
           {/* ─── Typing indicator bubble ──────────────────────────── */}
-          {isTyping && <TypingBubble style={{ marginBottom: 4 }} />}
+          {isTyping && viewMode === "chat" && <TypingBubble style={{ marginBottom: 4 }} />}
 
           {/* ─── Input Bar (anchored to bottom, moves with keyboard) ─ */}
-          <Animated.View style={[styles.inputBar, inputBarAnimStyle]}>
+          {viewMode === "chat" && (
+            <Animated.View style={[styles.inputBar, inputBarAnimStyle]}>
             {isRecordingAudio ? (
               <View style={styles.recordingContainer}>
                 <View
@@ -602,10 +713,10 @@ export default function WorldScreen({ navigation }) {
                 <TouchableOpacity
                   style={styles.attachButton}
                   onPress={() => setShowAttachMenu(true)}
-                  disabled={isUploading}
+                  disabled={isAnyUploading}
                   hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
-                  {isUploading ? (
+                  {isAnyUploading ? (
                     <ActivityIndicator size="small" color={colors.primary} />
                   ) : (
                     <Icon name="plus" size={22} color={colors.primary} />
@@ -649,7 +760,7 @@ export default function WorldScreen({ navigation }) {
                 ]}
                 onPressIn={handleRecordStart}
                 onPressOut={handleRecordStop}
-                disabled={isUploading}
+                disabled={isAnyUploading}
               >
                 <Icon
                   name="mic"
@@ -659,56 +770,59 @@ export default function WorldScreen({ navigation }) {
               </TouchableOpacity>
             )}
           </Animated.View>
-        </Animated.View>
-      </View>
+        )}
+      </Animated.View>
 
-      {/* Attachment Bottom Sheet */}
-      <Modal
-        visible={showAttachMenu}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowAttachMenu(false)}
-      >
-        <TouchableOpacity
-          style={styles.attachOverlay}
-          activeOpacity={1}
-          onPress={() => setShowAttachMenu(false)}
-        >
-          <View style={styles.attachSheet}>
-            <View style={styles.attachHandle} />
-            <Text style={styles.attachTitle}>Send Media</Text>
-            <View style={styles.attachOptions}>
-              <TouchableOpacity
-                style={styles.attachOption}
-                onPress={() => handleMediaPick("image", "gallery")}
-              >
-                <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
-                  <Icon name="image" size={22} color="#fff" />
+      {/* Attachment Bottom Sheet - only show in chat mode */}
+        {viewMode === "chat" && (
+          <Modal
+            visible={showAttachMenu}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setShowAttachMenu(false)}
+          >
+            <TouchableOpacity
+              style={styles.attachOverlay}
+              activeOpacity={1}
+              onPress={() => setShowAttachMenu(false)}
+            >
+              <View style={styles.attachSheet}>
+                <View style={styles.attachHandle} />
+                <Text style={styles.attachTitle}>Send Media</Text>
+                <View style={styles.attachOptions}>
+                  <TouchableOpacity
+                    style={styles.attachOption}
+                    onPress={() => handleMediaPick("image", "gallery")}
+                  >
+                    <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
+                      <Icon name="image" size={22} color="#fff" />
+                    </View>
+                    <Text style={styles.attachLabel}>Photo</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.attachOption}
+                    onPress={() => handleMediaPick("video", "gallery")}
+                  >
+                    <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
+                      <Icon name="film" size={22} color="#fff" />
+                    </View>
+                    <Text style={styles.attachLabel}>Video</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.attachOption}
+                    onPress={() => handleMediaPick("image", "camera")}
+                  >
+                    <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
+                      <Icon name="camera" size={22} color="#fff" />
+                    </View>
+                    <Text style={styles.attachLabel}>Camera</Text>
+                  </TouchableOpacity>
                 </View>
-                <Text style={styles.attachLabel}>Photo</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.attachOption}
-                onPress={() => handleMediaPick("video", "gallery")}
-              >
-                <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
-                  <Icon name="film" size={22} color="#fff" />
-                </View>
-                <Text style={styles.attachLabel}>Video</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.attachOption}
-                onPress={() => handleMediaPick("image", "camera")}
-              >
-                <View style={[styles.attachIcon, { backgroundColor: "#000" }]}>
-                  <Icon name="camera" size={22} color="#fff" />
-                </View>
-                <Text style={styles.attachLabel}>Camera</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </TouchableOpacity>
-      </Modal>
+              </View>
+            </TouchableOpacity>
+          </Modal>
+        )}
+      </View>
 
       {/* Full-Screen Media Viewer */}
       {viewerMedia && (
@@ -1028,5 +1142,36 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
     paddingLeft: 3,
+  },
+
+  // Chat/Video Toggle
+  toggleContainer: {
+    flexDirection: "row",
+    backgroundColor: colors.bgElevated,
+    borderRadius: 24,
+    padding: 3,
+    marginTop: 12,
+    marginHorizontal: 4,
+  },
+  toggleButton: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    gap: 6,
+  },
+  toggleButtonActive: {
+    backgroundColor: colors.primary,
+  },
+  toggleText: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: colors.textMuted,
+  },
+  toggleTextActive: {
+    color: "#fff",
   },
 });

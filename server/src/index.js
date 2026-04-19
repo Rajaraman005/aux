@@ -15,8 +15,10 @@ const { initializeSignaling } = require("./signaling/handler");
 const redisBridge = require("./signaling/redis");
 const presence = require("./signaling/presence");
 const metrics = require("./services/metrics");
+const heartbeatWatchdog = require("./services/heartbeatWatchdog");
 const { pushMetrics } = require("./services/pushService");
 const fcmService = require("./services/fcmService");
+const matchmaking = require("./services/matchmaking");
 
 const app = express();
 const server = http.createServer(app);
@@ -67,6 +69,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/conversations", require("./routes/chat"));
 app.use("/api/world", require("./routes/world"));
+app.use("/api/world-video", require("./routes/worldVideo"));
 app.use("/api/push", require("./routes/pushRoutes"));
 app.use("/api/friends", require("./routes/friends"));
 app.use("/api/notifications", require("./routes/notifications"));
@@ -105,9 +108,9 @@ app.post("/api/metrics/call", express.json(), (req, res) => {
   const { callId, stats } = req.body;
   if (stats) {
     if (stats.packetLoss !== undefined)
-      metrics.packetLoss.observe(stats.packetLoss);
-    if (stats.jitter !== undefined) metrics.jitter.observe(stats.jitter);
-    if (stats.rtt !== undefined) metrics.rtt.observe(stats.rtt);
+      metrics.packetLoss(stats.packetLoss);
+    if (stats.jitter !== undefined) metrics.jitter(stats.jitter);
+    if (stats.rtt !== undefined) metrics.rtt(stats.rtt);
   }
   res.json({ received: true });
 });
@@ -164,6 +167,25 @@ initializeSignaling(wss);
 async function start() {
   // Connect Redis (non-blocking — falls back to in-memory)
   await redisBridge.connect();
+
+  // Initialize matchmaking service (loads Lua script, subscribes to keyspace)
+  await matchmaking.init();
+
+  // Initialize heartbeat watchdog (distributed stale call detection)
+  heartbeatWatchdog.initialize();
+
+  server.on("error", (err) => {
+    if (err && err.code === "EADDRINUSE") {
+      console.error(
+        `\n❌ Port ${config.port} is already in use.\n` +
+          `   - Stop the other process using it, or\n` +
+          `   - Start with a different port: set PORT=3001 (Windows: $env:PORT=3001)\n`,
+      );
+      process.exit(1);
+    }
+    console.error("\n❌ Server error:", err);
+    process.exit(1);
+  });
 
   server.listen(config.port, () => {
     console.log(`\n${"═".repeat(50)}`);
@@ -224,6 +246,9 @@ async function shutdown(signal) {
 
   // Disconnect Redis
   await redisBridge.disconnect();
+
+  // Shutdown heartbeat watchdog
+  heartbeatWatchdog.shutdown();
 
   console.log("👋 Shutdown complete");
   process.exit(0);

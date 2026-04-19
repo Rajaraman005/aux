@@ -245,7 +245,162 @@ class RedisBridge extends EventEmitter {
     return Array.from(this._localPresence.keys());
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // WORLD VIDEO — Matchmaking & Session Support
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Execute a Lua script atomically on Redis.
+   * Used for matchmaking, blocklist checks, and session management.
+   * Falls back to in-memory if Redis is unavailable.
+   */
+  async evalLua(script, keys, args) {
+    if (!this.isConnected) {
+      console.warn("⚠️  Lua eval skipped — Redis unavailable");
+      return null;
+    }
+
+    try {
+      const result = await this.pub.eval(script, keys.length, ...keys, ...args);
+      return result;
+    } catch (err) {
+      console.error("Redis Lua eval error:", err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Load a Lua script into Redis and return its SHA for efficient evalSha calls.
+   */
+  async loadLuaScript(script) {
+    if (!this.isConnected) return null;
+
+    try {
+      const sha = await this.pub.script("load", script);
+      console.log(`📜 Lua script loaded: ${sha.substring(0, 8)}...`);
+      return sha;
+    } catch (err) {
+      console.error("Redis Lua load error:", err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Execute a pre-loaded Lua script by SHA.
+   * Falls back to full eval if the script is not cached (Redis restart).
+   */
+  async evalLuaSha(sha, script, keys, args) {
+    if (!this.isConnected) return null;
+
+    try {
+      const result = await this.pub.evalsha(sha, keys.length, ...keys, ...args);
+      return result;
+    } catch (err) {
+      if (err.message && err.message.includes("NOSCRIPT")) {
+        // Script flushed (Redis restart) — reload and retry
+        const newSha = await this.loadLuaScript(script);
+        if (!newSha) return null;
+        return await this.pub.evalsha(newSha, keys.length, ...keys, ...args);
+      }
+      console.error("Redis evalSha error:", err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Subscribe to Redis keyspace notifications.
+   * Used for session expiry detection (world:session:* TTL expiration).
+   * @param {string} pattern - e.g., '__keyevent@0__:expired'
+   * @param {function} callback - (event, key) => void
+   */
+  async subscribeKeyspaceNotifications(pattern, callback) {
+    if (!this.isConnected) {
+      console.warn("⚠️  Keyspace notifications skipped — Redis unavailable");
+      return;
+    }
+
+    try {
+      // Enable keyspace notifications if not already enabled
+      await this.pub.config("SET", "notify-keyspace-events", "Ex");
+
+      // Use a dedicated subscriber for keyspace events
+      // (separate from the main sub used for user signaling)
+      this._keyspaceSub = new Redis(config.redis.url, {
+        retryStrategy: () => null,
+        maxRetriesPerRequest: 1,
+        lazyConnect: true,
+        connectTimeout: 3000,
+        enableOfflineQueue: false,
+      });
+
+      this._keyspaceSub.on("error", () => {});
+
+      await this._keyspaceSub.connect();
+      await this._keyspaceSub.psubscribe(pattern);
+
+      this._keyspaceSub.on("pmessage", (pmPattern, channel, message) => {
+        try {
+          // channel format: __keyevent@0__:expired
+          // message format: world:session:123
+          const event = channel.split(":").pop(); // "expired", "set", "del", etc.
+          callback(event, message);
+        } catch (err) {
+          console.error("Keyspace notification error:", err);
+        }
+      });
+
+      console.log(`🔔 Keyspace notifications subscribed: ${pattern}`);
+    } catch (err) {
+      console.warn(`⚠️  Keyspace notifications failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Unsubscribe from keyspace notifications.
+   */
+  async unsubscribeKeyspaceNotifications() {
+    if (this._keyspaceSub) {
+      try {
+        await this._keyspaceSub.quit();
+      } catch {}
+      this._keyspaceSub = null;
+    }
+  }
+
+  /**
+   * Set a skip key for blocked pair prevention.
+   * Prevents infinite retry loop when blocked users keep getting matched.
+   */
+  async setSkipKey(user1, user2, ttl = 60) {
+    // Use canonical ordering to avoid duplicate keys
+    const [a, b] = [user1, user2].sort();
+    const key = `world:match:skip:${a}:${b}`;
+
+    if (this.isConnected) {
+      await this.pub.setex(key, ttl, "1");
+    }
+  }
+
+  /**
+   * Check if a skip key exists for a user pair.
+   */
+  async hasSkipKey(user1, user2) {
+    const [a, b] = [user1, user2].sort();
+    const key = `world:match:skip:${a}:${b}`;
+
+    if (this.isConnected) {
+      return (await this.pub.exists(key)) === 1;
+    }
+    return false;
+  }
+
   async disconnect() {
+    if (this._keyspaceSub) {
+      try {
+        await this._keyspaceSub.quit();
+      } catch {}
+      this._keyspaceSub = null;
+    }
     if (this.pub) this.pub.disconnect();
     if (this.sub) this.sub.disconnect();
     this.isConnected = false;

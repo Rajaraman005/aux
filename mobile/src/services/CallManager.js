@@ -86,6 +86,9 @@ class CallManager {
     this._durationTimer = null;
     this._durationSeconds = 0;
 
+    // ─── FAANG-grade: Call heartbeat timer
+    this._heartbeatTimer = null;
+
     // ─── AppState ─────────────────────────────────────────────────────
     this._appStateSubscription = null;
     this._backgroundedAt = null;
@@ -140,6 +143,7 @@ class CallManager {
     this._stopWatchdog();
     this._stopDurationTimer();
     this._stopAppStateMonitor();
+    this._stopHeartbeat();
     this._removeSignalingListeners();
 
     // Reset state
@@ -629,6 +633,36 @@ class CallManager {
     }
   }
 
+  // ★ FAANG-grade: Call heartbeat methods
+  _startHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+    }
+
+    // Send heartbeat immediately, then every 10 seconds
+    this._sendHeartbeat();
+
+    this._heartbeatTimer = setInterval(() => {
+      this._sendHeartbeat();
+    }, 10000);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  }
+
+  _sendHeartbeat() {
+    if (!this._session || !this._session.callId) return;
+
+    signalingClient.send({
+      type: 'call-heartbeat',
+      callId: this._session.callId,
+    });
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // WEBRTC INITIALIZATION
   // ═══════════════════════════════════════════════════════════════════════════
@@ -645,6 +679,7 @@ class CallManager {
           this._transition(STATES.CONNECTED);
           this._startDurationTimer();
           this._startWatchdog();
+          this._startHeartbeat(); // ★ FAANG-grade: Start call heartbeat
         } else if (
           newState === STATES.RECONNECTING ||
           newState === "reconnecting"

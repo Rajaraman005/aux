@@ -5,11 +5,10 @@
  *   POST /api/media/sign     — Generate signed upload params (client → Cloudinary direct)
  *   POST /api/media/validate — Validate uploaded media URL + run moderation
  *
- * Flow:
- *   1. Client calls POST /sign → gets { signature, uploadUrl, ... }
- *   2. Client uploads file DIRECTLY to Cloudinary (zero server load)
- *   3. Client calls POST /validate with the resulting URL → moderation runs
- *   4. Client sends WebSocket message with validated media_url
+ * ★ Idempotency: POST /validate accepts Idempotency-Key header.
+ *   Redis-backed cache with 10-minute TTL. Fail-open if Redis down.
+ *
+ * ★ Security: Sign endpoint includes max_file_size and timestamp expiry.
  */
 const express = require("express");
 const { authenticateToken } = require("../middleware/auth");
@@ -18,26 +17,62 @@ const {
   generateSignedUpload,
   isValidCloudinaryUrl,
   getThumbnailUrl,
+  log,
 } = require("../services/cloudinary");
 const { moderate } = require("../services/moderation");
+const redisBridge = require("../signaling/redis");
 
 const router = express.Router();
 router.use(authenticateToken);
 
+const ERROR_RESPONSES = {
+  INVALID_MEDIA_TYPE: { status: 400, code: "INVALID_MEDIA_TYPE" },
+  INVALID_USER_ID: { status: 400, code: "INVALID_USER_ID" },
+  INVALID_PUBLIC_ID: { status: 400, code: "INVALID_PUBLIC_ID" },
+  CONFIG_ERROR: { status: 503, code: "SERVICE_CONFIG_ERROR" },
+  MODERATION_REJECTED: { status: 413, code: "MODERATION_REJECTED" },
+  SIGN_ERROR: { status: 500, code: "SIGN_ERROR" },
+};
+
+function errorResponse(err, context = {}) {
+  const code = err.code || "SIGN_ERROR";
+
+  if (err.code === "INVALID_MEDIA_TYPE") {
+    return { status: 400, body: { error: err.message, code } };
+  }
+  if (err.code === "INVALID_USER_ID" || err.code === "INVALID_PUBLIC_ID") {
+    log.error("Upload sign validation failed", { ...context, code });
+    return { status: 400, body: { error: "Upload signing failed: invalid identifier", code } };
+  }
+  if (err.code === "CONFIG_ERROR") {
+    log.error("Cloudinary configuration error", { ...context, err: err.message });
+    return { status: 503, body: { error: "Upload service temporarily unavailable", code: "SERVICE_CONFIG_ERROR" } };
+  }
+
+  log.error("Sign upload error", { ...context, err: err.message, stack: err.stack });
+  return { status: 500, body: { error: "Failed to generate upload signature", code: "SIGN_ERROR" } };
+}
+
 // ─── POST /api/media/sign — Generate signed upload params ───────────────────
 router.post("/sign", apiLimiter, async (req, res) => {
+  const context = { userId: req.user?.id, mediaType: req.body?.mediaType };
+
   try {
     const { mediaType, fileSize, mimeType } = req.body;
 
-    // Validate mediaType
     if (!mediaType || !["image", "video", "audio"].includes(mediaType)) {
-      return res.status(400).json({
-        error: 'mediaType must be "image", "video", or "audio"',
-        code: "INVALID_MEDIA_TYPE",
-      });
+      const err = Object.assign(
+        new Error('mediaType must be "image", "video", or "audio"'),
+        { code: "INVALID_MEDIA_TYPE" },
+      );
+      throw err;
     }
 
-    // Pre-flight moderation (check size + MIME before generating signature)
+    if (!req.user?.id) {
+      const err = Object.assign(new Error("Invalid user ID"), { code: "INVALID_USER_ID" });
+      throw err;
+    }
+
     const preCheck = await moderate({
       mediaType,
       size: fileSize,
@@ -46,6 +81,7 @@ router.post("/sign", apiLimiter, async (req, res) => {
     });
 
     if (!preCheck.allowed) {
+      log.info("Upload rejected by moderation", { userId: req.user.id, mediaType, flags: preCheck.flags });
       return res.status(413).json({
         error: preCheck.reason,
         code: "MODERATION_REJECTED",
@@ -53,19 +89,18 @@ router.post("/sign", apiLimiter, async (req, res) => {
       });
     }
 
-    // Generate signed upload params
     const signedParams = generateSignedUpload(req.user.id, mediaType);
+
+    log.info("Signed upload params generated", { userId: req.user.id, mediaType, publicId: signedParams.publicId });
 
     res.json({
       ...signedParams,
-      maxFileSize: mediaType === "video" ? 50 * 1024 * 1024 : 10 * 1024 * 1024,
+      maxFileSize: signedParams.maxFileSize,
+      expiresAt: signedParams.expiresAt,
     });
   } catch (err) {
-    console.error("Sign upload error:", err.message);
-    res.status(500).json({
-      error: "Failed to generate upload signature",
-      code: "SIGN_ERROR",
-    });
+    const { status, body } = errorResponse(err, context);
+    res.status(status).json(body);
   }
 });
 
@@ -82,7 +117,6 @@ router.post("/validate", apiLimiter, async (req, res) => {
       });
     }
 
-    // Verify URL belongs to our Cloudinary account
     if (!isValidCloudinaryUrl(url)) {
       return res.status(400).json({
         error: "Invalid media URL",
@@ -90,7 +124,19 @@ router.post("/validate", apiLimiter, async (req, res) => {
       });
     }
 
-    // Post-upload moderation
+    const idempotencyKey = req.headers["idempotency-key"] || req.body?.idempotencyKey;
+
+    if (idempotencyKey && redisBridge.isConnected) {
+      try {
+        const cached = await redisBridge.pub.get(`idem:${idempotencyKey}`);
+        if (cached) {
+          return res.json(JSON.parse(cached));
+        }
+      } catch (err) {
+        log.error("Idempotency cache read error", { err: err.message });
+      }
+    }
+
     const modResult = await moderate({
       url,
       mediaType: mediaType || "image",
@@ -102,6 +148,7 @@ router.post("/validate", apiLimiter, async (req, res) => {
     });
 
     if (!modResult.allowed) {
+      log.info("Validation rejected by moderation", { userId: req.user.id, mediaType, flags: modResult.flags });
       return res.status(403).json({
         error: modResult.reason,
         code: "MODERATION_REJECTED",
@@ -109,10 +156,9 @@ router.post("/validate", apiLimiter, async (req, res) => {
       });
     }
 
-    // Generate thumbnail URL
     const thumbnailUrl = getThumbnailUrl(url);
 
-    res.json({
+    const result = {
       validated: true,
       url,
       thumbnailUrl,
@@ -121,9 +167,25 @@ router.post("/validate", apiLimiter, async (req, res) => {
       height: height || null,
       duration: duration || null,
       flags: modResult.flags,
-    });
+    };
+
+    if (idempotencyKey && redisBridge.isConnected) {
+      try {
+        await redisBridge.pub.set(
+          `idem:${idempotencyKey}`,
+          JSON.stringify(result),
+          "EX",
+          600,
+        );
+      } catch (err) {
+        log.error("Idempotency cache write error", { err: err.message });
+      }
+    }
+
+    log.info("Media validated", { userId: req.user.id, mediaType });
+    res.json(result);
   } catch (err) {
-    console.error("Validate media error:", err.message);
+    log.error("Validate media error", { userId: req.user?.id, err: err.message, stack: err.stack });
     res.status(500).json({
       error: "Failed to validate media",
       code: "VALIDATE_ERROR",

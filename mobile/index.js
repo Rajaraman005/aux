@@ -19,6 +19,31 @@
  * the push silently dies — which is exactly the bug we're fixing.
  */
 
+// ─── crypto.getRandomValues polyfill (MUST run before ANY module imports) ──
+// uuid v13 and other packages require crypto.getRandomValues, which doesn't
+// exist in Hermes/JSC. This polyfill ensures it's available globally.
+// Using Math.random() is sufficient for non-cryptographic IDs (upload IDs, etc.).
+if (typeof global.crypto !== "object" || typeof global.crypto.getRandomValues !== "function") {
+  if (typeof global.crypto !== "object" || global.crypto === null) {
+    global.crypto = {};
+  }
+  global.crypto.getRandomValues = function getRandomValues(array) {
+    for (let i = 0; i < array.length; i++) {
+      array[i] = (Math.random() * 256) | 0;
+    }
+    return array;
+  };
+  if (!global.crypto.randomUUID) {
+    global.crypto.randomUUID = function randomUUID() {
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === "x" ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+      });
+    };
+  }
+}
+
 import { AppRegistry, Platform } from "react-native";
 import { expo as appConfig } from "./app.json";
 import App from "./App";
@@ -29,26 +54,28 @@ import App from "./App";
 import crashLogger, { CATEGORIES } from "./src/services/CrashLogger";
 
 // 1. Catch all unhandled JS exceptions (synchronous throws, etc.)
-const defaultHandler = ErrorUtils.getGlobalHandler();
-ErrorUtils.setGlobalHandler((error, isFatal) => {
-  try {
-    crashLogger.log(
-      CATEGORIES.CRASH_DETECTED,
-      `Unhandled ${isFatal ? "FATAL" : "non-fatal"} JS error`,
-      error,
-    );
-  } catch (_) {
-    // CrashLogger itself failed — don't make things worse
-  }
+if (global.ErrorUtils) {
+  const defaultHandler = ErrorUtils.getGlobalHandler();
+  ErrorUtils.setGlobalHandler((error, isFatal) => {
+    try {
+      crashLogger.log(
+        CATEGORIES.CRASH_DETECTED,
+        `Unhandled ${isFatal ? "FATAL" : "non-fatal"} JS error`,
+        error,
+      );
+    } catch (_) {
+      // CrashLogger itself failed — don't make things worse
+    }
 
-  if (isFatal) {
-    // ★ ALWAYS forward fatal errors to the default handler.
-    // Swallowing fatals causes a white screen because the app state is corrupt.
-    // The ErrorBoundary in App.js handles React-level errors with a recovery UI.
-    defaultHandler?.(error, isFatal);
-  }
-  // Non-fatal: log only, do not crash
-});
+    if (isFatal) {
+      // ★ ALWAYS forward fatal errors to the default handler.
+      // Swallowing fatals causes a white screen because the app state is corrupt.
+      // The ErrorBoundary in App.js handles React-level errors with a recovery UI.
+      defaultHandler?.(error, isFatal);
+    }
+    // Non-fatal: log only, do not crash
+  });
+}
 
 // 2. Catch unhandled Promise rejections (wrapped in try-catch for safety)
 try {

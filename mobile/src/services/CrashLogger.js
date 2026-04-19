@@ -35,6 +35,7 @@ const CATEGORIES = {
   MEMORY_WARNING: "MEMORY_WARNING",
   LIFECYCLE: "LIFECYCLE",
   ERROR_BOUNDARY: "ERROR_BOUNDARY",
+  MEDIA_UPLOAD: "MEDIA_UPLOAD",
 };
 
 class CrashLogger {
@@ -58,10 +59,19 @@ class CrashLogger {
     };
 
     if (error) {
-      entry.e = error.message || String(error);
-      if (error.stack) {
-        // Keep only first 3 lines of stack to save space
-        entry.s = error.stack.split("\n").slice(0, 3).join("\n");
+      if (error instanceof Error) {
+        entry.e = error.message || String(error);
+        if (error.stack) {
+          entry.s = error.stack.split("\n").slice(0, 3).join("\n");
+        }
+      } else if (typeof error === "object") {
+        try {
+          entry.e = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+        } catch {
+          entry.e = String(error);
+        }
+      } else {
+        entry.e = String(error);
       }
     }
 

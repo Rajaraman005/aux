@@ -195,10 +195,7 @@ export default function ProfileScreen({ navigation }) {
         // Build FormData
         const formData = new FormData();
         formData.append("avatar", {
-          uri:
-            Platform.OS === "ios"
-              ? compressed.uri.replace("file://", "")
-              : compressed.uri,
+          uri: compressed.uri,
           type: "image/jpeg",
           name: "avatar.jpg",
         });
